@@ -54,6 +54,9 @@ export default function Home() {
     Record<string, CharacterAnalysis>
   >({});
 
+  // Note: photoAnalyses state is set during analysis and passed to generate-prompts.
+  // The setter is used in handleGeneratePrompts; the getter is not needed at render time.
+
   // ── Prompts state (Phase 2) ────────────────────────────────────────────
   const [clips, setClips] = useState<ClipPrompt[]>([]);
   const [characterSheet, setCharacterSheet] = useState("");
@@ -389,12 +392,10 @@ export default function Home() {
                 videoUrl={videoUrl}
                 clips={clips}
                 setClips={setClips}
-                clipPaths={clipPaths}
                 numClips={numClips}
                 onRegenerate={handleRegenerate}
                 onReset={handleReset}
                 loading={loading}
-                apiBase={API_BASE}
               />
             </motion.div>
           )}

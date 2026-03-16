@@ -26,8 +26,8 @@ TMP = tempfile.gettempdir()
 
 def _get_ffmpeg() -> str:
     """Return path to ffmpeg binary or raise."""
-    import shutil as _shutil
-    ffmpeg_bin = _shutil.which("ffmpeg")
+    import shutil
+    ffmpeg_bin = shutil.which("ffmpeg")
     if ffmpeg_bin is None:
         try:
             import imageio_ffmpeg

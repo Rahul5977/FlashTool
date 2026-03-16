@@ -8,8 +8,6 @@ This file only wires up HTTP routes and manages session state (temp files).
 import logging
 import os
 import tempfile
-import traceback
-from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -82,11 +80,6 @@ def _get_clients() -> tuple:
     gemini_client = genai.Client(api_key=api_key)
     video_client = genai.Client(api_key=api_key, http_options={"api_version": "v1alpha"})
     return gemini_client, video_client
-
-
-# In-memory session store for character photos used during generation
-# In production, replace with Redis/DB or pass as form data.
-_session_char_photos: dict = {}  # session_id → [(name, bytes, mime)]
 
 
 # ══════════════════════════════════════════════════════════════════════════════

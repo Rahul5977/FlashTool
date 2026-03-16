@@ -10,12 +10,10 @@ interface Props {
   videoUrl: string;
   clips: ClipPrompt[];
   setClips: Dispatch<SetStateAction<ClipPrompt[]>>;
-  clipPaths: string[];
   numClips: number;
   onRegenerate: (indices: number[]) => Promise<void>;
   onReset: () => void;
   loading: boolean;
-  apiBase: string;
 }
 
 /* ─── Component ─────────────────────────────────────────────────────────── */
