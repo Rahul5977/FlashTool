@@ -270,16 +270,17 @@ def analyze_character_photo(client, name: str, photo_bytes: bytes, mime_type: st
             types.Part.from_bytes(data=photo_bytes, mime_type=mime_type),
             types.Part.from_text(text=(
                 f"Analyse this person's photo and return a JSON object with exactly two keys.\n\n"
-                f"Key 1 — 'appearance': describe ONLY face and body (NOT clothing).\n"
+                f"Key 1 — 'appearance': describe ONLY the static physical baseline (face and body).\n"
                 f"Include: skin tone (exact), face shape, eye shape+color+spacing, brow shape, "
-                f"nose shape, lip fullness, jawline, distinctive marks (moles/dimples/wrinkles "
-                f"with exact location), hair (color/texture/length/style/parting/grey), "
-                f"age range (e.g. '35-40'), build. "
+                f"nose shape, lip fullness, jawline, distinctive marks, hair (color/texture/length/style), "
+                f"age range, build. \n"
+                f"CRITICAL: DO NOT include any temporary emotions, expressions, or time-based changes "
+                f"(e.g., never say 'at first', 'becomes', 'looks sad'). Keep it 100% physically neutral.\n"
                 f"One dense paragraph starting with '{name} is a [age]...'.\n\n"
                 f"Key 2 — 'outfit': describe ONLY what they are wearing.\n"
                 f"Every garment, color, fabric, pattern, fit. Be exact — this is locked forever.\n"
                 f"One sentence starting with 'Wearing...'.\n\n"
-                f"Return ONLY valid JSON: {{\"appearance\": \"...\", \"outfit\": \"...\"}}\n"
+                f"Return ONLY valid JSON: {{\n  \"appearance\": \"...\",\n  \"outfit\": \"...\"\n}}\n"
                 f"No markdown, no preamble."
             )),
         ],
@@ -311,6 +312,9 @@ def build_character_sheet(client, script: str) -> str:
             f"hair (length/color/texture/style), build, "
             f"LOCKED OUTFIT (exact garment/color/fabric — never changes), "
             f"accessories, signature expression.\n\n"
+            f"CRITICAL RULE: Describe the neutral, static physical baseline ONLY. "
+            f"DO NOT include time-based changes or temporary emotions (e.g., never write "
+            f"'her hair gets smoother later' or 'her expression changes').\n\n"
             f"FORMAT:\nCHARACTER: [Name/Role]\n"
             f"OUTFIT: [one sentence, exact garment]\n"
             f"APPEARANCE: [all other details, one dense paragraph]\n\n"
@@ -413,96 +417,52 @@ anchors must still be present in every prompt to reinforce consistency throughou
 TASK: Split the given SuperLiving ad script into exactly {num_clips} sequential 8-second clip prompts.
 ALL CLIP PROMPTS MUST BE WRITTEN IN DEVANAGARI HINDI.
 
-ABOUT SUPERLIVING: Indian health app, target = women 25-60 in Tier 3 & 4 India.
-Tone = authentic, real, emotional. Real homes, real faces, warm earthy tones.
-
 {char_consistency_rule}
 
-SCRIPT COVERAGE — CRITICAL:
-You MUST cover the ENTIRE script from start to finish across all {num_clips} clips.
-- Divide the script content EVENLY across all clips — no clip should be empty or filler.
-- The LAST CLIP must contain the script's conclusion, CTA, or final message.
-- If the script has a brand name, tagline, or call-to-action, it MUST appear in the final clip.
-- Do NOT end abruptly — the final clip must feel like a satisfying conclusion.
-- Before generating, mentally map: which script portions go into which clips.
+THE "RULE OF ONE ACTION" & CAMERA GEOMETRY (CRITICAL FOR VEO):
+Diffusion models 'melt' if overloaded. You MUST follow these isolation rules:
+- ACTION ISOLATION: Never overload an 8-second clip. If a character changes emotion (e.g., sad to happy), their body MUST remain absolutely still (write: "शरीर बिल्कुल स्थिर रहता है, हाथ नीचे ही रहेंगे"). 
+- If a character does a physical action (dropping products, lifting phone), their emotion must already be established.
+- CAMERA LOCK: Whenever a character moves their hands or body, you MUST use "(STATIC SHOT) / कैमरा बिल्कुल स्थिर रहता है". Do NOT zoom or pan while a character is moving.
+- LOCATION LOCK: Never instruct the camera to pan or transition between rooms (e.g., bathroom to living room). Keep the location locked. Use hard cuts for scene changes.
 
-PACING & ENGAGEMENT — NO DEAD AIR:
-Every clip MUST have EITHER dialogue OR significant visible action. Ads must be gripping.
-- MINIMUM per clip: at least 8 words of dialogue OR a clear dramatic action beat.
-- NO silent contemplation clips — if a character is thinking, they should voice it.
-- NO filler clips with just "character smiles" — always pair with dialogue or movement.
-- If the script has less dialogue, add contextual voiceover narration to fill gaps.
-- Prefer dialogue-heavy clips — talking heads are engaging for Indian audiences.
+UI & HALLUCINATION GUARDRAILS:
+- THE PHONE SCREEN TRAP: Veo cannot render a second human face inside a phone screen. If a phone is shown, you MUST state: "फोन की स्क्रीन काली है" (The phone screen is black). NEVER describe an app UI or a video call.
+
+DIALOGUE LENGTH — THE LIP-SYNC 'GOLDILOCKS ZONE':
+- STRICT LIMIT: Exactly 15 to 19 Hindi words of spoken dialogue per clip. 
+- Less than 15 words causes the AI to speak in slow-motion.
+- More than 20 words causes rushed, chipmunk-speed speech and breaks lip-sync.
+- Balance the script perfectly to hit 15-19 words per 8-second clip. Split long sentences across clips seamlessly.
+- Format: चरित्र: "संवाद"
 
 CONTINUITY RULES:
-- Every prompt except clip 1 MUST begin with a CONTINUING FROM: block.
-  At generation time this is auto-replaced with a Gemini Vision description of actual
-  rendered frames — so write a detailed scripted version as placeholder:
-  "CONTINUING FROM: [exact final frame — character position, expression, room, lighting,
-   camera angle/distance, what was just said or done, emotional state, BGM state]"
-- The new clip's action must flow ORGANICALLY from that moment — mid-sentence dialogue
-  can continue, movement can carry over, emotional arc continues unbroken.
-- BGM described identically across all clips (same song, note if it swells or fades)
+- Every prompt except clip 1 MUST begin with a CONTINUING FROM: block describing the exact last frame of the previous clip.
 - End every prompt with: "LAST FRAME: [exact position, expression, camera, framing]"
 
-DIALOGUE FORMAT — MANDATORY:
-Every line of dialogue must use speaker-colon format:
-  चरित्र का नाम: "बोला हुआ संवाद"
-Examples:
-  माँ: "बेटा, आज बहुत थकान हो गई।"
-  बेटी: "माँ, अब सब ठीक हो जाएगा।"
-  वॉयसओवर: "सुपरलिविंग — हर कदम पर आपके साथ।"
-NEVER write dialogue without the speaker name and colon prefix.
-Multiple speakers in one clip = list each on a new line with their name.
+CLIP PROMPT STRUCTURE:
+1. CONTINUING FROM: [For clips 2+]
+2. OUTFIT & APPEARANCE: [Locked, verbatim]
+3. LOCATION: [Locked, no panning]
+4. ACTION: [Emotion + strictly isolated body movement]
+5. DIALOGUE: [Strictly 15-19 words]
+6. AUDIO: [BGM consistent]
+7. CAMERA: [Use (STATIC SHOT) frequently]
+8. LIGHTING: [Consistent]
+9. LAST FRAME: [Anchor for next clip]
 
-DIALOGUE LENGTH — BALANCED FOR LIP-SYNC:
-Each 8-second clip should have 8-20 Hindi words of spoken dialogue.
-- MINIMUM: 8 words per clip (keeps the ad engaging, no dead air)
-- MAXIMUM: 20 words per clip (beyond this, lip-sync becomes rushed)
-- IDEAL: 10-15 words per clip (natural speaking pace)
-- Split longer sentences across clips if needed — mid-sentence cuts are fine.
-- If a clip truly needs silence (rare emotional beat), limit to MAX 1 such clip per ad.
-- Voiceover can supplement character dialogue to hit the minimum.
+AUDIO-VISUAL SYNC:
+Add to every prompt: "Audio-visual sync: match lip movements precisely to spoken dialogue."
 
-FINAL CLIP — MANDATORY CONCLUSION:
-The last clip (clip {num_clips}) MUST contain:
-1. The script's concluding statement or final dialogue
-2. Brand mention: "सुपरलिविंग" spoken or shown
-3. A clear call-to-action if present in script (e.g., "आज ही डाउनलोड करें")
-4. Satisfying visual closure — character smiling at camera, product shot, or logo moment
-5. Do NOT leave any script content unused — the last clip wraps up everything
-
-CLIP PROMPT STRUCTURE (follow every time):
-1. OUTFIT LINE (mandatory): "[Name] is wearing [locked outfit] and [locked appearance]."
-2. LOCATION: specify exact room/place
-3. Action & emotion arc for these 8 seconds
-4. Dialogue: each line as चरित्र: "संवाद" (8-20 words total per clip)
-5. Audio: BGM (consistent across clips), ambient sounds
-6. CAMERA: continuous take, describe angle/distance/movement
-7. LIGHTING: copy exact description from Clip 1 to maintain color consistency
-8. LAST FRAME: [exact final frame description for next clip continuity]
-
-AUDIO-VISUAL SYNC (add to every prompt that has dialogue):
-"Audio-visual sync: match lip movements precisely to spoken dialogue."
-
-CONTENT SAFETY (Veo silently rejects these):
-- No diseases, conditions, symptoms, medicines, BP, sugar, diabetes, weight loss, pain
-- No doctors, prescriptions, treatments
-- Reframe as: confidence, energy, wellness, happiness, lifestyle
-
-VISUAL FORMAT PROHIBITIONS (add to every prompt):
-- "No cinematic letterbox bars. No black bars. Full {ar} frame edge to edge."
-- "No burned-in subtitles. No text overlays. No lower thirds. No captions. No watermarks."
+VISUAL FORMAT PROHIBITIONS:
+Add to every prompt: "No cinematic letterbox bars. No black bars. Full {ar} frame edge to edge. No burned-in subtitles. No text overlays. No lower thirds. No captions. No watermarks. No on-screen app UI. If showing phone, show dark screen only."
 
 {"Dialogue: note tone e.g. 'warmly, looking at camera'" if language_note else ""}
-Each prompt: 200–270 words. More detail = better continuity.
-Aspect ratio: {ar}
 
 OUTPUT: valid JSON only:
 {{
   "clips": [
-    {{"clip": 1, "scene_summary": "brief label", "last_frame": "...", "prompt": "..."}},
-    {{"clip": 2, "scene_summary": "brief label", "last_frame": "...", "prompt": "CONTINUING FROM: [...]. ..."}},
+    {{"clip": 1, "scene_summary": "...", "last_frame": "...", "prompt": "..."}},
     ... (exactly {num_clips} items)
   ]
 }}"""
