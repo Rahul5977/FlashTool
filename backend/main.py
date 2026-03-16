@@ -1,0 +1,422 @@
+"""
+FastAPI application — routes for the SuperLiving AI Video Ad Generator.
+
+All AI logic lives in ai_engine.py, all FFmpeg logic in video_engine.py.
+This file only wires up HTTP routes and manages session state (temp files).
+"""
+
+import logging
+import os
+import tempfile
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from google import genai
+from google.genai import types
+
+from .ai_engine import (
+    RaiCelebrityError,
+    RaiContentError,
+    analyze_character_photo,
+    build_character_sheet,
+    build_clip_prompts,
+    download_video,
+    extract_generated_video,
+    generate_clip_from_image,
+    generate_clip_text_only,
+    generate_clip_with_frame_context,
+    get_clip_character_photo,
+    rephrase_blocked_prompt,
+    sanitize_prompt_for_veo,
+)
+from .api_models import (
+    AnalyzeCharactersResponse,
+    CharacterAnalysis,
+    ClipPrompt,
+    GeneratePromptsRequest,
+    GeneratePromptsResponse,
+    GenerateVideoRequest,
+    GenerateVideoResponse,
+    RegenerateClipsRequest,
+    RegenerateClipsResponse,
+)
+from .video_engine import _get_ffmpeg, stitch_clips
+
+load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+TMP = tempfile.gettempdir()
+
+# ── FastAPI App ───────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="SuperLiving Ad Generator API",
+    version="1.0.0",
+    description="AI-powered video ad generation using Gemini + Veo",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _get_api_key() -> str:
+    key = os.getenv("GOOGLE_API_KEY", "")
+    if not key:
+        raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured on server.")
+    return key
+
+
+def _get_clients() -> tuple:
+    api_key = _get_api_key()
+    gemini_client = genai.Client(api_key=api_key)
+    video_client = genai.Client(api_key=api_key, http_options={"api_version": "v1alpha"})
+    return gemini_client, video_client
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROUTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok"}
+
+
+@app.post("/api/analyze-characters", response_model=AnalyzeCharactersResponse)
+async def analyze_characters(
+    names: list[str] = Form(...),
+    photos: list[UploadFile] = File(...),
+):
+    """
+    Accepts uploaded images + character names.
+    Runs analyze_character_photo for each, returns locked JSON appearance/outfit.
+    """
+    if len(names) != len(photos):
+        raise HTTPException(
+            status_code=400,
+            detail="Number of names must match number of photos.",
+        )
+
+    gemini_client, _ = _get_clients()
+    analyses: dict[str, CharacterAnalysis] = {}
+
+    for name, photo in zip(names, photos):
+        name = name.strip()
+        if not name:
+            continue
+        photo_bytes = await photo.read()
+        mime_type = photo.content_type or "image/jpeg"
+        try:
+            result = analyze_character_photo(gemini_client, name, photo_bytes, mime_type)
+            analyses[name] = CharacterAnalysis(**result)
+        except Exception as e:
+            logger.warning(f"Could not analyse {name}: {e}")
+            analyses[name] = CharacterAnalysis(appearance="", outfit="")
+
+    return AnalyzeCharactersResponse(analyses=analyses)
+
+
+@app.post("/api/generate-prompts", response_model=GeneratePromptsResponse)
+async def generate_prompts(request: GeneratePromptsRequest):
+    """
+    Accepts the script, character data, and settings.
+    Runs build_clip_prompts and returns the array of prompts for user review.
+    """
+    gemini_client, _ = _get_clients()
+
+    # Build character sheet if no photos provided
+    character_sheet = request.character_sheet
+    if not request.has_photos and not character_sheet:
+        try:
+            character_sheet = build_character_sheet(gemini_client, request.script)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Character sheet generation failed: {e}")
+
+    # Convert photo_analyses from Pydantic to plain dict
+    photo_analyses_dict = {
+        name: {"appearance": data.appearance, "outfit": data.outfit}
+        for name, data in request.photo_analyses.items()
+    }
+
+    try:
+        clips = build_clip_prompts(
+            client=gemini_client,
+            script=request.script,
+            extra_prompt=request.extra_prompt,
+            extra_image_parts=[],  # Reference images handled via separate upload
+            character_sheet=character_sheet,
+            photo_analyses=photo_analyses_dict,
+            aspect_ratio=request.aspect_ratio,
+            num_clips=request.num_clips,
+            language_note=request.language_note,
+            has_photos=request.has_photos,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prompt generation failed: {e}")
+
+    return GeneratePromptsResponse(
+        clips=[ClipPrompt(**c) for c in clips],
+        character_sheet=character_sheet,
+    )
+
+
+@app.post("/api/generate-video", response_model=GenerateVideoResponse)
+async def generate_video(request: GenerateVideoRequest):
+    """
+    Accepts user-reviewed prompts.
+    Runs the Veo generation loop (including last-frame I2V extraction)
+    and the stitch_clips function. Returns the final MP4 file URL.
+    """
+    gemini_client, video_client = _get_clients()
+    api_key = _get_api_key()
+
+    clip_paths: list[str] = []
+    MAX_RETRIES = 3
+
+    try:
+        for i, clip in enumerate(request.clips):
+            logger.info(f"🎥 Clip {clip.clip}/{request.num_clips}: {clip.scene_summary}")
+            current_prompt = clip.prompt
+            operation = None
+
+            # ── Pre-sanitize before first attempt ─────────────────────────
+            try:
+                sanitized = sanitize_prompt_for_veo(
+                    gemini_client, current_prompt, clip.clip
+                )
+                if sanitized and len(sanitized) > 100:
+                    current_prompt = sanitized
+            except Exception as san_err:
+                logger.warning(f"⚠️ Sanitizer failed ({san_err}) — using original prompt")
+
+            for attempt in range(1, MAX_RETRIES + 1):
+                if attempt > 1:
+                    current_prompt = rephrase_blocked_prompt(
+                        gemini_client, current_prompt, attempt
+                    )
+
+                try:
+                    if i == 0:
+                        # Clip 1: text-only (no photos in this route)
+                        operation = generate_clip_text_only(
+                            video_client, request.veo_model, current_prompt,
+                            request.aspect_ratio, clip.clip, request.num_clips,
+                        )
+                    else:
+                        # Clips 2+: last-frame I2V
+                        prev_path = clip_paths[i - 1]
+                        next_summary = request.clips[i].scene_summary if i < len(request.clips) else ""
+                        operation, current_prompt = generate_clip_with_frame_context(
+                            video_client, gemini_client,
+                            request.veo_model, current_prompt, request.aspect_ratio,
+                            clip.clip, request.num_clips,
+                            prev_path, next_summary,
+                        )
+                except Exception as gen_err:
+                    logger.warning(f"⚠️ Generation failed: {gen_err} — falling back to text-only")
+                    operation = generate_clip_text_only(
+                        video_client, request.veo_model, current_prompt,
+                        request.aspect_ratio, clip.clip, request.num_clips,
+                    )
+
+                if operation is None:
+                    if attempt < MAX_RETRIES:
+                        continue
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Clip {clip.clip} timed out after {MAX_RETRIES} attempts.",
+                    )
+
+                try:
+                    video_obj = extract_generated_video(operation, clip.clip)
+                except RaiCelebrityError:
+                    operation = generate_clip_text_only(
+                        video_client, request.veo_model, current_prompt,
+                        request.aspect_ratio, clip.clip, request.num_clips,
+                    )
+                    if operation is None:
+                        video_obj = None
+                    else:
+                        try:
+                            video_obj = extract_generated_video(operation, clip.clip)
+                        except (RaiCelebrityError, RaiContentError):
+                            video_obj = None
+                except RaiContentError:
+                    video_obj = None
+
+                if video_obj is not None:
+                    break
+
+                if attempt == MAX_RETRIES:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Clip {clip.clip} failed after {MAX_RETRIES} attempts.",
+                    )
+
+            # ── Save clip ─────────────────────────────────────────────────
+            clip_path = os.path.join(TMP, f"superliving_clip_{i+1:02d}.mp4")
+            video_bytes = download_video(video_obj.uri, api_key)
+            with open(clip_path, "wb") as f:
+                f.write(video_bytes)
+            clip_paths.append(clip_path)
+            logger.info(f"✅ Clip {clip.clip} saved ({len(video_bytes)//1024} KB)")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Video generation error: {e}")
+
+    # ── Stitch ────────────────────────────────────────────────────────────
+    final_path = os.path.join(TMP, "superliving_final_ad.mp4")
+    if request.num_clips > 1:
+        ok = stitch_clips(clip_paths, final_path)
+        if not ok:
+            final_path = clip_paths[0]
+    else:
+        final_path = clip_paths[0]
+
+    return GenerateVideoResponse(
+        video_url=f"/api/video/{os.path.basename(final_path)}",
+        clip_paths=clip_paths,
+        message=f"Successfully generated {request.num_clips} clip(s).",
+    )
+
+
+@app.post("/api/regenerate-clips", response_model=RegenerateClipsResponse)
+async def regenerate_clips(request: RegenerateClipsRequest):
+    """
+    Accepts specific clip indices, regenerates only those,
+    runs stitch_clips again, and returns the new video.
+    """
+    gemini_client, video_client = _get_clients()
+    api_key = _get_api_key()
+
+    clip_paths = list(request.clip_paths)
+    MAX_RETRIES = 3
+
+    try:
+        for idx in sorted(request.clip_indices):
+            i = idx
+            clip = request.clips[i]
+            logger.info(f"🔄 Regenerating clip {clip.clip}/{request.num_clips}: {clip.scene_summary}")
+            current_prompt = clip.prompt
+            operation = None
+
+            # ── Pre-sanitize ──────────────────────────────────────────
+            try:
+                sanitized = sanitize_prompt_for_veo(
+                    gemini_client, current_prompt, clip.clip
+                )
+                if sanitized and len(sanitized) > 100:
+                    current_prompt = sanitized
+            except Exception:
+                pass
+
+            for attempt in range(1, MAX_RETRIES + 1):
+                if attempt > 1:
+                    current_prompt = rephrase_blocked_prompt(
+                        gemini_client, current_prompt, attempt
+                    )
+
+                try:
+                    if i == 0:
+                        operation = generate_clip_text_only(
+                            video_client, request.veo_model, current_prompt,
+                            request.aspect_ratio, clip.clip, request.num_clips,
+                        )
+                    else:
+                        prev_path = clip_paths[i - 1]
+                        next_summary = request.clips[i].scene_summary
+                        operation, current_prompt = generate_clip_with_frame_context(
+                            video_client, gemini_client,
+                            request.veo_model, current_prompt, request.aspect_ratio,
+                            clip.clip, request.num_clips,
+                            prev_path, next_summary,
+                        )
+                except Exception as gen_err:
+                    logger.warning(f"⚠️ Regen failed: {gen_err} — text-only fallback")
+                    operation = generate_clip_text_only(
+                        video_client, request.veo_model, current_prompt,
+                        request.aspect_ratio, clip.clip, request.num_clips,
+                    )
+
+                if operation is None:
+                    if attempt < MAX_RETRIES:
+                        continue
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Clip {clip.clip} timed out after {MAX_RETRIES} attempts.",
+                    )
+
+                try:
+                    video_obj = extract_generated_video(operation, clip.clip)
+                except RaiCelebrityError:
+                    operation = generate_clip_text_only(
+                        video_client, request.veo_model, current_prompt,
+                        request.aspect_ratio, clip.clip, request.num_clips,
+                    )
+                    if operation is None:
+                        video_obj = None
+                    else:
+                        try:
+                            video_obj = extract_generated_video(operation, clip.clip)
+                        except (RaiCelebrityError, RaiContentError):
+                            video_obj = None
+                except RaiContentError:
+                    video_obj = None
+
+                if video_obj is not None:
+                    break
+                if attempt == MAX_RETRIES:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Clip {clip.clip} failed after {MAX_RETRIES} attempts.",
+                    )
+
+            # ── Save regenerated clip ─────────────────────────────────
+            clip_path = os.path.join(TMP, f"superliving_clip_{i+1:02d}.mp4")
+            video_bytes = download_video(video_obj.uri, api_key)
+            with open(clip_path, "wb") as f:
+                f.write(video_bytes)
+            clip_paths[i] = clip_path
+            logger.info(f"✅ Clip {clip.clip} regenerated ({len(video_bytes)//1024} KB)")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Regeneration error: {e}")
+
+    # ── Re-stitch ─────────────────────────────────────────────────────────
+    final_path = os.path.join(TMP, "superliving_final_ad.mp4")
+    if request.num_clips > 1:
+        ok = stitch_clips(clip_paths, final_path)
+        if not ok:
+            final_path = clip_paths[0]
+    else:
+        final_path = clip_paths[0]
+
+    return RegenerateClipsResponse(
+        video_url=f"/api/video/{os.path.basename(final_path)}",
+        clip_paths=clip_paths,
+        message=f"Successfully regenerated {len(request.clip_indices)} clip(s).",
+    )
+
+
+# ── Serve generated videos ───────────────────────────────────────────────────
+
+@app.get("/api/video/{filename}")
+async def serve_video(filename: str):
+    """Serve a generated video file from the temp directory."""
+    path = os.path.join(TMP, filename)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Video file not found.")
+    return FileResponse(path, media_type="video/mp4", filename=filename)
