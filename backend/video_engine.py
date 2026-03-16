@@ -12,6 +12,7 @@ import re as _re
 import shutil
 import subprocess
 import tempfile
+import traceback
 
 try:
     import imageio_ffmpeg
@@ -98,49 +99,29 @@ def extract_last_frame(video_path: str) -> bytes:
         return f.read()
 
 
-def stitch_clips(clip_paths: list, output_path: str) -> bool:
+
+class _CrossfadeSkipped(Exception):
+    """Internal signal: crossfade was skipped, proceed to concat fallback."""
+    pass
+
+def stitch_clips(clip_paths: list, output_path: str, transition_sec: float = 0.3) -> bool:
     """
-    Stitch AI-generated clips into one seamless video with zero audio pops,
-    zero A/V desync, and zero timestamp drift.
+    Stitch AI-generated clips into one seamless video with cinematic crossfades,
+    zero audio pops, zero A/V desync, and zero timestamp drift.
 
-    ─── THE PROBLEM ───
-    Veo-generated clips have audio streams that are a fraction of a second
-    longer or shorter than the video stream. When naïvely concatenated:
-      - Audio pops/clicks at every cut boundary (partial AAC frames)
-      - Cumulative A/V drift (each clip adds ±50ms of misalignment)
-      - Lip-sync breaks down after 2-3 clips
-
-    ─── THE FIX: 3-STAGE NORMALIZATION ───
-
-    Stage 1 — Video: force exact 24fps, yuv420p, even resolution, H.264.
-              This gives every clip identical GOP structure and timebase.
-
-    Stage 2 — Audio sync (THE CRITICAL PART):
-      • aresample=async=1  →  stretches/squeezes audio timestamps to match
-                               the video clock. Eliminates sub-frame drift.
-      • apad                →  pads silence at the end if audio is shorter
-                               than video (prevents abrupt cutoff).
-      • -shortest           →  truncates the padded audio exactly when the
-                               video stream ends (clean cut, no overhang).
-      Together these three guarantee: audio duration == video duration,
-      sample-accurately, for every single clip.
-
-      For clips WITHOUT audio: generate anullsrc silence trimmed to the
-      exact video duration (parsed from ffmpeg -i stderr, no ffprobe).
-
-    Stage 3 — Concat demuxer with -c copy. Because every clip now has
-              identical codec params AND identical A/V durations, stream-copy
-              concat is frame-perfect with zero re-encoding artifacts.
-
-    NO FFPROBE DEPENDENCY — duration parsed from `ffmpeg -i` stderr via regex.
+    ─── THE FIX: 3-STAGE PIPELINE ───
+    Stage 1 — Normalization: aresample=async=1, apad, -shortest (A/V sync)
+    Stage 2 — Crossfade: filter_complex dynamic chain (xfade + acrossfade)
+    Stage 3 — Fallback: Concat demuxer (if crossfade fails)
     """
 
     # ── Locate ffmpeg binary ──────────────────────────────────────────────────
     ffmpeg_bin = shutil.which("ffmpeg")
     if ffmpeg_bin is None:
         try:
+            import imageio_ffmpeg
             ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception:
+        except ImportError:
             pass
     if not ffmpeg_bin:
         logger.error("❌ ffmpeg not found — cannot stitch clips.")
@@ -168,56 +149,32 @@ def stitch_clips(clip_paths: list, output_path: str) -> bool:
 
     try:
         # ══════════════════════════════════════════════════════════════════════
-        # STAGE 1+2: Normalize every clip — video + audio sync
-        #
-        # Goal: every output file has EXACTLY matching video and audio
-        # durations, identical codecs, and clean stream boundaries.
+        # STAGE 1: Normalize every clip — video + audio sync
         # ══════════════════════════════════════════════════════════════════════
         normalized = []
+        durations  = []
 
         for i, p in enumerate(clip_paths):
             norm_path = os.path.join(TMP, f"norm_{i:02d}.mp4")
             clip_has_audio = has_audio_stream(p)
 
             if clip_has_audio:
-                # ── HAS AUDIO: aresample→apad→-shortest pipeline ─────────
-                #
-                # aresample=async=1:
-                #   Resamples audio so its timestamps exactly match the video
-                #   clock. If audio is 7.68s but video is 7.70s, async=1
-                #   stretches/inserts silence samples to fill the gap.
-                #   This kills sub-frame drift that causes cumulative desync.
-                #
-                # apad:
-                #   Pads the audio with silence PAST the video end — this
-                #   guarantees audio is never shorter than video (which would
-                #   cause a pop/click at the cut boundary).
-                #
-                # -shortest:
-                #   Terminates the output when the SHORTEST stream (video)
-                #   ends. Since apad made audio infinite, -shortest cleanly
-                #   cuts it at exactly the video duration. No overhang.
-                #
-                # Net result: audio_duration == video_duration, sample-perfect.
                 logger.info(f"  📎 Clip {i+1}: normalizing video + audio (aresample→apad→shortest)...")
                 r = subprocess.run(
                     [ffmpeg_bin, "-y", "-i", p,
-                     # ── Video filters ──
                      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=24,format=yuv420p",
                      "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                      "-pix_fmt", "yuv420p",
-                     # ── Audio filters (the critical sync chain) ──
                      "-af", "aresample=async=1,apad",
                      "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k",
-                     # ── Trim audio to exact video length ──
                      "-shortest",
                      norm_path],
                     capture_output=True, text=True,
                 )
                 if r.returncode != 0:
                     logger.warning(f"  ⚠️ Clip {i+1}: aresample pipeline failed, trying basic normalize...")
-                    logger.debug(f"  🔧 Clip {i+1} aresample error: {r.stderr[-800:]}")
-                    # Fallback: basic normalize without aresample (still better than raw)
+                    logger.debug(f"Clip {i+1} aresample error:\n{r.stderr[-800:]}")
+                    
                     r = subprocess.run(
                         [ffmpeg_bin, "-y", "-i", p,
                          "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=24,format=yuv420p",
@@ -229,72 +186,121 @@ def stitch_clips(clip_paths: list, output_path: str) -> bool:
                         capture_output=True, text=True,
                     )
                     if r.returncode != 0:
-                        raise RuntimeError(
-                            f"Normalize clip {i+1} failed (both pipelines):\n{r.stderr[-500:]}"
-                        )
+                        raise RuntimeError(f"Normalize clip {i+1} failed (both pipelines):\n{r.stderr[-500:]}")
 
             else:
-                # ── NO AUDIO: generate silence trimmed to exact video duration ─
-                #
-                # We probe the video-only duration first, then generate a
-                # silent audio track of exactly that length with -t.
-                # This is more precise than -shortest with anullsrc (which
-                # can leave a trailing partial AAC frame).
                 vid_dur = probe_duration(p)
                 logger.info(f"  🔇 Clip {i+1}: no audio — generating {vid_dur:.3f}s silence track...")
                 r = subprocess.run(
                     [ffmpeg_bin, "-y",
                      "-i", p,
                      "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={vid_dur:.4f}",
-                     # ── Video ──
                      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=24,format=yuv420p",
                      "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                      "-pix_fmt", "yuv420p",
-                     # ── Map video from input 0, audio from input 1 ──
                      "-map", "0:v:0", "-map", "1:a:0",
                      "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k",
-                     # ── Hard trim to video duration (belt + suspenders) ──
                      "-t", f"{vid_dur:.4f}",
                      norm_path],
                     capture_output=True, text=True,
                 )
                 if r.returncode != 0:
-                    raise RuntimeError(
-                        f"Normalize+silence clip {i+1} failed:\n{r.stderr[-500:]}"
-                    )
+                    raise RuntimeError(f"Normalize+silence clip {i+1} failed:\n{r.stderr[-500:]}")
 
-            # Log the result
             dur = probe_duration(norm_path)
             normalized.append(norm_path)
+            durations.append(dur)
             sz = os.path.getsize(norm_path) // 1024
             logger.info(f"  ✅ Clip {i+1}: {dur:.2f}s normalized ({sz} KB)")
 
-        # ── Single clip — just copy, no concat needed ─────────────────────────
         if len(normalized) == 1:
             shutil.copy(normalized[0], output_path)
             logger.info("  ✅ Single clip — no stitching needed")
             return True
 
         # ══════════════════════════════════════════════════════════════════════
-        # STAGE 3: Concat demuxer — stream-copy (primary), re-encode (fallback)
-        #
-        # All clips now have:
-        #   ✓ Identical video codec (H.264 main, yuv420p, 24fps)
-        #   ✓ Identical audio codec (AAC, 44100Hz, stereo, 128kbps)
-        #   ✓ audio_duration == video_duration (sample-perfect)
-        #
-        # Stream-copy concat should be seamless. Re-encode fallback exists
-        # only for edge cases (profile/level mismatches across clips).
+        # STAGE 2: Crossfade via filter_complex
         # ══════════════════════════════════════════════════════════════════════
+        n = len(normalized)
+        T = transition_sec
 
-        # Write concat list with absolute paths (cross-platform safe)
+        clips_too_short = any(d < 2 * T + 0.1 for d in durations)
+        if T <= 0 or clips_too_short:
+            if clips_too_short and T > 0:
+                logger.warning(f"⚠️ Some clips are shorter than {2*T+0.1:.1f}s — skipping crossfades.")
+            raise _CrossfadeSkipped("clips too short or transition disabled")
+
+        logger.info(f"  🎬 Building crossfade filter: {n} clips, {n-1} × {T}s fade...")
+
+        v_filters = []
+        a_filters = []
+        cumulative = durations[0]
+
+        for i in range(n - 1):
+            offset = max(0.0, cumulative - T)
+
+            in_v1 = "[0:v]" if i == 0 else f"[vf{i-1}]"
+            in_v2 = f"[{i+1}:v]"
+            out_v = "[vout]" if i == n - 2 else f"[vf{i}]"
+            v_filters.append(f"{in_v1}{in_v2}xfade=transition=fade:duration={T}:offset={offset:.4f}{out_v}")
+
+            in_a1 = "[0:a]" if i == 0 else f"[af{i-1}]"
+            in_a2 = f"[{i+1}:a]"
+            out_a = "[aout]" if i == n - 2 else f"[af{i}]"
+            a_filters.append(f"{in_a1}{in_a2}acrossfade=d={T}:c1=tri:c2=tri{out_a}")
+
+            cumulative = cumulative - T + durations[i + 1]
+
+        filter_complex = ";".join(v_filters + a_filters)
+
+        cmd = [ffmpeg_bin, "-y"]
+        for p in normalized:
+            cmd += ["-i", p]
+
+        cmd += [
+            "-filter_complex", filter_complex,
+            "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+
+        logger.debug(f"Crossfade filter_complex:\n{filter_complex}")
+        logger.info("  ⏳ Running crossfade render (this may take a moment)...")
+        r_xfade = subprocess.run(cmd, capture_output=True, text=True)
+
+        if (r_xfade.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 100_000):
+            sz = os.path.getsize(output_path) // (1024 * 1024)
+            final_dur = probe_duration(output_path)
+            expected_dur = sum(durations) - (n - 1) * T
+            logger.info(f"  ✅ Final video: {sz} MB, {final_dur:.2f}s (expected ~{expected_dur:.2f}s) — cinematic {T}s crossfades 🎬")
+            return True
+
+        logger.warning("⚠️ Crossfade render failed — falling back to hard-cut concat.")
+        logger.debug(f"Crossfade error stderr:\n{r_xfade.stderr[-2000:]}")
+        raise _CrossfadeSkipped("xfade render failed")
+
+    except _CrossfadeSkipped:
+        pass
+    except Exception as e:
+        logger.error(f"❌ Stitch error during normalization/crossfade: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE 3 — FALLBACK: Concat demuxer (hard cuts, no crossfade)
+    # ══════════════════════════════════════════════════════════════════════════
+    try:
+        logger.info("  🔗 Falling back to concat demuxer (hard cuts)...")
+
         list_file = os.path.join(TMP, "veo_concat_list.txt")
         with open(list_file, "w") as f:
             for p in normalized:
                 safe_path = os.path.abspath(p).replace("\\", "/")
                 f.write(f"file '{safe_path}'\n")
 
-        # ── 3a: Stream-copy concat (fast, zero quality loss) ──────────────────
         r_copy = subprocess.run(
             [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
              "-i", list_file,
@@ -304,20 +310,14 @@ def stitch_clips(clip_paths: list, output_path: str) -> bool:
             capture_output=True, text=True,
         )
 
-        if (r_copy.returncode == 0
-                and os.path.exists(output_path)
-                and os.path.getsize(output_path) > 100_000):
+        if (r_copy.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 100_000):
             sz = os.path.getsize(output_path) // (1024 * 1024)
             final_dur = probe_duration(output_path)
-            logger.info(
-                f"  ✅ Final video: {sz} MB, {final_dur:.2f}s "
-                f"(stream-copy concat, A/V sync locked)"
-            )
+            logger.info(f"  ✅ Final video: {sz} MB, {final_dur:.2f}s (stream-copy concat)")
             return True
 
-        # ── 3b: Re-encode concat (fallback) ──────────────────────────────────
         logger.warning("⚠️ Stream-copy concat failed — falling back to re-encode concat.")
-        logger.debug(f"🔧 Stream-copy error: {r_copy.stderr[-2000:]}")
+        logger.debug(f"Stream-copy concat error:\n{r_copy.stderr[-2000:]}")
 
         r_reencode = subprocess.run(
             [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
@@ -332,24 +332,16 @@ def stitch_clips(clip_paths: list, output_path: str) -> bool:
             capture_output=True, text=True,
         )
 
-        if (r_reencode.returncode == 0
-                and os.path.exists(output_path)
-                and os.path.getsize(output_path) > 100_000):
+        if (r_reencode.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 100_000):
             sz = os.path.getsize(output_path) // (1024 * 1024)
             final_dur = probe_duration(output_path)
-            logger.info(
-                f"  ✅ Final video: {sz} MB, {final_dur:.2f}s "
-                f"(re-encode concat fallback, A/V sync locked)"
-            )
+            logger.info(f"  ✅ Final video: {sz} MB, {final_dur:.2f}s (re-encode concat fallback)")
             return True
 
-        logger.error(
-            f"❌ All stitching methods failed.\n"
-            f"Stream-copy stderr:\n{r_copy.stderr[-400:]}\n\n"
-            f"Re-encode stderr:\n{r_reencode.stderr[-400:]}"
-        )
+        logger.error(f"❌ All stitching methods failed.\nCopy error: {r_copy.stderr[-400:]}\nRe-encode error: {r_reencode.stderr[-400:]}")
         return False
 
     except Exception as e:
-        logger.error(f"❌ Stitch error: {e}", exc_info=True)
+        logger.error(f"❌ Stitch error (concat fallback): {e}")
+        logger.error(traceback.format_exc())
         return False
