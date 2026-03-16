@@ -229,3 +229,12 @@ pyrightconfig.json
 
 # Custom rules (everything added below won't be overriden by 'Generate .gitignore File' if you use 'Update' option)
 
+# Node.js / Next.js
+node_modules/
+.next/
+out/
+.vercel
+
+# Backend
+backend/.env
+
