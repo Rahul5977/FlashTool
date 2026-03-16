@@ -84,12 +84,13 @@ def auto_generate_character_image(api_key: str, physical_baseline: str, outfit: 
     )
 
     prompt = (
-        f"A photorealistic portrait of an everyday person. "
-        f"{physical_baseline}. Wearing {outfit}. "
-        f"Natural lighting, shot on a 50mm lens, cinematic portrait, "
-        f"highly detailed realistic skin texture, non-celebrity, "
-        f"authentic everyday person."
-    )
+    f"A raw, unedited smartphone photo of an everyday Indian person. "
+    f"{physical_baseline}. Wearing {outfit}. "
+    f"Shot on iPhone 14 front camera, selfie-style framing, candid and authentic. "
+    f"Natural indoor lighting from a nearby window. "
+    f"Ultra-realistic skin texture with visible pores, slight imperfections, and natural peach fuzz. "
+    f"No makeup filter, completely unretouched, non-celebrity, ordinary person, UGC style ad footage."
+)
 
     payload = json.dumps({
         "instances": [{"prompt": prompt}],

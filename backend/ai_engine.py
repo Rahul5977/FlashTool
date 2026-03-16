@@ -253,8 +253,8 @@ CLIP PROMPT STRUCTURE:
 4. ACTION: [Emotion + strictly isolated body movement]
 5. DIALOGUE: [Strictly 15-19 words]
 6. AUDIO: [BGM consistent]
-7. CAMERA: [Use (STATIC SHOT) frequently]
-8. LIGHTING: [Consistent]
+7. CAMERA: [Describe angle]. MUST include: "Ultra-sharp focus, 8k resolution, highly detailed."
+8. LIGHTING: [Describe lighting]. MUST include: "Cinematic contrast, photorealistic skin texture, extremely crisp."
 9. LAST FRAME: [Anchor for next clip]
 
 AUDIO-VISUAL SYNC:
