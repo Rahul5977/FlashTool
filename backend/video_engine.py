@@ -95,6 +95,46 @@ def extract_last_frame(video_path: str) -> bytes:
         return f.read()
 
 
+def trim_clip_to_duration(input_path: str, output_path: str, target_duration: float = 8.5) -> bool:
+    """
+    Trim a clip to a target duration (removes excess silence/dead space at end).
+    Used when a clip is significantly longer than expected.
+    
+    Args:
+        input_path: Path to input video
+        output_path: Path to output trimmed video
+        target_duration: Target duration in seconds (default 8.5s for 8-second clips)
+
+    Returns:
+        True if trim successful, False otherwise
+    """
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin is None:
+        try:
+            import imageio_ffmpeg
+            ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        except ImportError:
+            return False
+    
+    try:
+        result = subprocess.run(
+            [ffmpeg_bin, "-y", "-i", input_path,
+             "-t", str(target_duration),
+             "-c:v", "copy", "-c:a", "copy",
+             output_path],
+            capture_output=True, text=True, timeout=60
+        )
+        
+        if result.returncode == 0 and os.path.exists(output_path):
+            logger.info(f"  ✂️ Trimmed {os.path.basename(input_path)} to {target_duration:.1f}s")
+            return True
+        else:
+            logger.warning(f"  ⚠️ Trim failed: {result.stderr[-300:]}")
+            return False
+    except Exception as e:
+        logger.warning(f"  ⚠️ Trim exception: {e}")
+        return False
+
 
 class _CrossfadeSkipped(Exception):
     """Internal signal: crossfade was skipped, proceed to concat fallback."""
@@ -111,7 +151,7 @@ def stitch_clips(clip_paths: list, output_path: str, transition_sec: float = 0.3
     Stage 3 — Fallback: Concat demuxer (if crossfade fails)
     """
 
-    # ── Locate ffmpeg binary ──────────────────────────────────────────────────
+    # ── Locate ffmpeg binary 
     ffmpeg_bin = shutil.which("ffmpeg")
     if ffmpeg_bin is None:
         try:
@@ -208,6 +248,21 @@ def stitch_clips(clip_paths: list, output_path: str, transition_sec: float = 0.3
             durations.append(dur)
             sz = os.path.getsize(norm_path) // 1024
             logger.info(f"  ✅ Clip {i+1}: {dur:.2f}s normalized ({sz} KB)")
+            
+            # ── Validate clip duration: detect anomalies ───────────────────
+            # Expected: ~8 seconds for 8-second generated clips
+            # Anomaly: >25 seconds (indicates silence padding or gen error)
+            # NOTE: CTA is 16s, so we only trim if way beyond normal range
+            if dur > 25.0:
+                logger.warning(f"  ⚠️ Clip {i+1} is unusually long ({dur:.2f}s) — trimming to 8.5s")
+                trimmed_path = os.path.join(TMP, f"norm_{i:02d}_trimmed.mp4")
+                if trim_clip_to_duration(norm_path, trimmed_path, target_duration=8.5):
+                    # Replace with trimmed version
+                    os.remove(norm_path)
+                    shutil.move(trimmed_path, norm_path)
+                    dur = probe_duration(norm_path)
+                    durations[-1] = dur  # Update duration
+                    logger.info(f"  ✅ Clip {i+1} trimmed to {dur:.2f}s")
 
         if len(normalized) == 1:
             shutil.copy(normalized[0], output_path)

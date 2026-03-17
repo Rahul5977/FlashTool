@@ -6,6 +6,7 @@ FFmpeg logic -> video_engine.py.
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 
 from dotenv import load_dotenv
@@ -342,13 +343,53 @@ async def generate_video(request: GenerateVideoRequest):
     cta_source_path = os.path.join(os.path.dirname(__file__), "assets", "Male CTA 9x16.mp4")
     if os.path.exists(cta_source_path):
         try:
-            # Copy CTA to temp directory (same location as generated clips)
+            # Normalize CTA to match generated clips (24fps, yuv420p, aac audio)
             cta_temp_path = os.path.join(TMP, "superliving_cta.mp4")
-            shutil.copy2(cta_source_path, cta_temp_path)
-            clip_paths.append(cta_temp_path)
-            logger.info(f"✅ CTA video copied and appended to clip sequence ({os.path.getsize(cta_temp_path)//1024} KB)")
+            
+            # Get FFmpeg path
+            ffmpeg_bin = shutil.which("ffmpeg")
+            if ffmpeg_bin is None:
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+                except ImportError:
+                    ffmpeg_bin = None
+            
+            if ffmpeg_bin:
+                # Probe CTA to get duration
+                probe_result = subprocess.run(
+                    [ffmpeg_bin, "-i", cta_source_path],
+                    capture_output=True, text=True,
+                )
+                import re as _re
+                duration_match = _re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe_result.stderr)
+                cta_duration = 0
+                if duration_match:
+                    cta_duration = int(duration_match.group(1)) * 3600 + int(duration_match.group(2)) * 60 + float(duration_match.group(3))
+                
+                # Normalize CTA: match generated clips' properties
+                norm_result = subprocess.run(
+                    [ffmpeg_bin, "-y", "-i", cta_source_path,
+                     "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=24,format=yuv420p",
+                     "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                     "-pix_fmt", "yuv420p",
+                     "-af", "aresample=async=1,apad",
+                     "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k",
+                     "-shortest",
+                     cta_temp_path],
+                    capture_output=True, text=True,
+                )
+                
+                if norm_result.returncode == 0 and os.path.exists(cta_temp_path):
+                    clip_paths.append(cta_temp_path)
+                    logger.info(f"✅ CTA normalized and appended ({os.path.getsize(cta_temp_path)//1024} KB, ~{cta_duration:.1f}s)")
+                else:
+                    logger.warning(f"⚠️ CTA normalization failed, skipping CTA")
+                    logger.debug(f"FFmpeg error: {norm_result.stderr[-500:]}")
+            else:
+                logger.warning(f"⚠️ FFmpeg not found, cannot normalize CTA")
         except Exception as cta_err:
-            logger.warning(f"⚠️ Failed to copy CTA video: {cta_err} — proceeding without CTA")
+            logger.warning(f"⚠️ CTA processing failed: {cta_err} — proceeding without CTA")
     else:
         logger.warning(f"⚠️ CTA video not found at {cta_source_path} — proceeding without CTA")
 
@@ -476,13 +517,53 @@ async def regenerate_clips(request: RegenerateClipsRequest):
     cta_source_path = os.path.join(os.path.dirname(__file__), "assets", "Male CTA 9x16.mp4")
     if os.path.exists(cta_source_path):
         try:
-            # Copy CTA to temp directory (same location as generated clips)
+            # Normalize CTA to match generated clips (24fps, yuv420p, aac audio)
             cta_temp_path = os.path.join(TMP, "superliving_cta.mp4")
-            shutil.copy2(cta_source_path, cta_temp_path)
-            clip_paths.append(cta_temp_path)
-            logger.info(f"✅ CTA video copied and appended to clip sequence ({os.path.getsize(cta_temp_path)//1024} KB)")
+            
+            # Get FFmpeg path
+            ffmpeg_bin = shutil.which("ffmpeg")
+            if ffmpeg_bin is None:
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+                except ImportError:
+                    ffmpeg_bin = None
+            
+            if ffmpeg_bin:
+                # Probe CTA to get duration
+                probe_result = subprocess.run(
+                    [ffmpeg_bin, "-i", cta_source_path],
+                    capture_output=True, text=True,
+                )
+                import re as _re
+                duration_match = _re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe_result.stderr)
+                cta_duration = 0
+                if duration_match:
+                    cta_duration = int(duration_match.group(1)) * 3600 + int(duration_match.group(2)) * 60 + float(duration_match.group(3))
+                
+                # Normalize CTA: match generated clips' properties
+                norm_result = subprocess.run(
+                    [ffmpeg_bin, "-y", "-i", cta_source_path,
+                     "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=24,format=yuv420p",
+                     "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                     "-pix_fmt", "yuv420p",
+                     "-af", "aresample=async=1,apad",
+                     "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k",
+                     "-shortest",
+                     cta_temp_path],
+                    capture_output=True, text=True,
+                )
+                
+                if norm_result.returncode == 0 and os.path.exists(cta_temp_path):
+                    clip_paths.append(cta_temp_path)
+                    logger.info(f"✅ CTA normalized and appended ({os.path.getsize(cta_temp_path)//1024} KB, ~{cta_duration:.1f}s)")
+                else:
+                    logger.warning(f"⚠️ CTA normalization failed, skipping CTA")
+                    logger.debug(f"FFmpeg error: {norm_result.stderr[-500:]}")
+            else:
+                logger.warning(f"⚠️ FFmpeg not found, cannot normalize CTA")
         except Exception as cta_err:
-            logger.warning(f"⚠️ Failed to copy CTA video: {cta_err} — proceeding without CTA")
+            logger.warning(f"⚠️ CTA processing failed: {cta_err} — proceeding without CTA")
     else:
         logger.warning(f"⚠️ CTA video not found at {cta_source_path} — proceeding without CTA")
 
