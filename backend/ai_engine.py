@@ -1,7 +1,5 @@
 """
-🚨 CRITICAL: The system prompts, Veo API payloads, and RAI error handling
-logic in this file are EXACT copies from the original monolith.
-DO NOT alter, "optimize", or rewrite them.
+AI Engine for SuperLiving ad generation.
 """
 
 import json
@@ -15,10 +13,8 @@ from google.genai import types
 logger = logging.getLogger(__name__)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# EXCEPTIONS
-# ══════════════════════════════════════════════════════════════════════════════
 
+# EXCEPTIONS
 class RaiCelebrityError(Exception):
     """Raised when Veo rejects the I2V input image due to celebrity detection."""
     pass
@@ -28,9 +24,9 @@ class RaiContentError(Exception):
     pass
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+
 # POLLING
-# ══════════════════════════════════════════════════════════════════════════════
+
 
 def poll_operation(video_client, operation, label: str):
     elapsed = 0
@@ -49,10 +45,8 @@ def poll_operation(video_client, operation, label: str):
     return operation
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CHARACTER ANALYSIS
-# ══════════════════════════════════════════════════════════════════════════════
 
+# CHARACTER ANALYSIS
 def analyze_character_photo(client, name: str, photo_bytes: bytes, mime_type: str) -> dict:
     """
     Gemini Vision → two locked fields:
@@ -122,10 +116,8 @@ def build_character_sheet(client, script: str) -> str:
     return response.text.strip()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CLIP CHARACTER MATCHING
-# ══════════════════════════════════════════════════════════════════════════════
 
+# CLIP CHARACTER MATCHING
 def get_clip_character_photo(clip_prompt: str, char_photos_raw: list) -> tuple:
     """Returns (photo_bytes, mime_type, name) for the most-mentioned character in this clip."""
     if not char_photos_raw:
@@ -148,11 +140,7 @@ def get_clip_character_photo(clip_prompt: str, char_photos_raw: list) -> tuple:
 
     return best_bytes, best_mime, best_name
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 # PROMPT GENERATION
-# ══════════════════════════════════════════════════════════════════════════════
-
 def build_clip_prompts(
     client,
     script: str,
@@ -313,10 +301,8 @@ OUTPUT: valid JSON only:
     return data["clips"]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CONTINUING FROM (Gemini Vision)
-# ══════════════════════════════════════════════════════════════════════════════
 
+# CONTINUING FROM (Gemini Vision)
 def build_continuing_from(
     gemini_client,
     frames: list,
@@ -371,10 +357,8 @@ def build_continuing_from(
     return response.text.strip()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# VIDEO GENERATION (Veo API calls)
-# ══════════════════════════════════════════════════════════════════════════════
 
+# VIDEO GENERATION (Veo API calls)
 def generate_clip_from_image(
     video_client, model: str, prompt: str, ar: str,
     clip_num: int, total: int,
@@ -486,9 +470,8 @@ def generate_clip_text_only(
     return operation
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+
 # EXTRACT / DOWNLOAD
-# ══════════════════════════════════════════════════════════════════════════════
 
 def extract_generated_video(operation, clip_num: int):
     """
@@ -549,9 +532,9 @@ def download_video(uri: str, api_key: str) -> bytes:
     return bytes(buf)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+
 # PROMPT SANITIZATION
-# ══════════════════════════════════════════════════════════════════════════════
+
 
 def sanitize_prompt_for_veo(client, prompt: str, clip_num: int) -> str:
     """

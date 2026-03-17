@@ -337,9 +337,17 @@ async def generate_video(request: GenerateVideoRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Video generation error: {e}")
 
+    # ── Append CTA video ──────────────────────────────────────────────────
+    cta_video_path = os.path.join(os.path.dirname(__file__), "assets", "Male CTA 9x16.mp4")
+    if os.path.exists(cta_video_path):
+        clip_paths.append(cta_video_path)
+        logger.info(f"✅ CTA video appended to clip sequence")
+    else:
+        logger.warning(f"⚠️ CTA video not found at {cta_video_path} — proceeding without CTA")
+
     # ── Stitch ────────────────────────────────────────────────────────────
     final_path = os.path.join(TMP, "superliving_final_ad.mp4")
-    if request.num_clips > 1:
+    if len(clip_paths) > 1:
         ok = stitch_clips(clip_paths, final_path)
         if not ok:
             final_path = clip_paths[0]
@@ -457,9 +465,17 @@ async def regenerate_clips(request: RegenerateClipsRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Regeneration error: {e}")
 
+    # ── Append CTA video ──────────────────────────────────────────────────
+    cta_video_path = os.path.join(os.path.dirname(__file__), "assets", "Male CTA 9x16.mp4")
+    if os.path.exists(cta_video_path):
+        clip_paths.append(cta_video_path)
+        logger.info(f"✅ CTA video appended to clip sequence")
+    else:
+        logger.warning(f"⚠️ CTA video not found at {cta_video_path} — proceeding without CTA")
+
     # ── Re-stitch ─────────────────────────────────────────────────────────
     final_path = os.path.join(TMP, "superliving_final_ad.mp4")
-    if request.num_clips > 1:
+    if len(clip_paths) > 1:
         ok = stitch_clips(clip_paths, final_path)
         if not ok:
             final_path = clip_paths[0]

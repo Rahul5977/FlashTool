@@ -1,9 +1,5 @@
 """
-Video Engine — FFmpeg functions extracted from sl_ad_gen_rahul.py.
-
-🚨 CRITICAL: The stitch_clips logic, offsets, FFmpeg commands, and all
-math in this file are EXACT copies from the original monolith.
-DO NOT alter, "optimize", or rewrite them.
+Video processing utilities for Veo.
 """
 
 import logging
