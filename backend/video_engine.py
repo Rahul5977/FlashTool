@@ -36,6 +36,82 @@ def _get_ffmpeg() -> str:
     return ffmpeg_bin
 
 
+def concat_with_normalized_cta(clip_paths: list[str], output_path: str) -> bool:
+    """
+    Fast concat pipeline for AI clips + CTA.
+
+    CTA is pre-normalized to a stable spec (H.264, yuv420p, 30fps,
+    AAC 44.1k stereo, video_track_timescale 90000) before running the
+    concat demuxer with stream copy. This prevents header/decoder
+    issues on local players when the CTA's technical profile differs
+    from the generated clips.
+    """
+    if len(clip_paths) < 2:
+        raise ValueError("clip_paths must include at least one AI clip and the CTA as the final entry.")
+
+    ffmpeg_bin = _get_ffmpeg()
+
+    # Ensure all sources exist before doing any work
+    for p in clip_paths:
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"Input clip not found: {p}")
+
+    ai_clips, cta_clip = clip_paths[:-1], clip_paths[-1]
+    normalized_cta = os.path.join(TMP, "cta_normalized_concat.mp4")
+    concat_list = os.path.join(TMP, "cta_concat_list.txt")
+
+    try:
+        # Normalize CTA to the required spec
+        norm_cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-i", cta_clip,
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30,format=yuv420p",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-r", "30",
+            "-c:a", "aac",
+            "-ar", "44100",
+            "-ac", "2",
+            "-video_track_timescale", "90000",
+            normalized_cta,
+        ]
+        subprocess.run(norm_cmd, check=True, capture_output=True, text=True)
+
+        # Build concat list with normalized CTA
+        with open(concat_list, "w") as f:
+            for src in ai_clips + [normalized_cta]:
+                safe_path = os.path.abspath(src).replace("\\", "/")
+                f.write(f"file '{safe_path}'\n")
+
+        concat_cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_list,
+            "-c", "copy",
+            output_path,
+        ]
+        subprocess.run(concat_cmd, check=True, capture_output=True, text=True)
+        return True
+
+    except subprocess.CalledProcessError as exc:
+        logger.error("FFmpeg concat pipeline failed: %s", exc.stderr or exc.stdout or exc)
+        print(exc.stderr or exc.stdout or exc)  # Surface stderr for debugging
+        return False
+    except Exception:
+        logger.error("Unexpected error during CTA concat:\n%s", traceback.format_exc())
+        return False
+    finally:
+        for tmp_path in (concat_list, normalized_cta):
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+
 def extract_last_n_frames(video_path: str, n: int = 10) -> list:
     """
     Extract the last N frames of an MP4 as a list of JPEG bytes.

@@ -50,7 +50,7 @@ from .api_models import (
     RegenerateClipsRequest,
     RegenerateClipsResponse,
 )
-from .video_engine import _get_ffmpeg, stitch_clips
+from .video_engine import _get_ffmpeg, concat_with_normalized_cta, stitch_clips
 
 load_dotenv()
 
@@ -339,6 +339,7 @@ async def generate_video(request: GenerateVideoRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Video generation error: {e}")
 
+    cta_added = False
     # ── Append CTA video ──────────────────────────────────────────────────
     cta_source_path = os.path.join(os.path.dirname(__file__), "assets", "Male CTA 9x16.mp4")
     if os.path.exists(cta_source_path):
@@ -382,6 +383,7 @@ async def generate_video(request: GenerateVideoRequest):
                 
                 if norm_result.returncode == 0 and os.path.exists(cta_temp_path):
                     clip_paths.append(cta_temp_path)
+                    cta_added = True
                     logger.info(f"✅ CTA normalized and appended ({os.path.getsize(cta_temp_path)//1024} KB, ~{cta_duration:.1f}s)")
                 else:
                     logger.warning(f"⚠️ CTA normalization failed, skipping CTA")
@@ -395,6 +397,22 @@ async def generate_video(request: GenerateVideoRequest):
 
     # ── Stitch ────────────────────────────────────────────────────────────
     final_path = os.path.join(TMP, "superliving_final_ad.mp4")
+    if len(clip_paths) > 1 and cta_added:
+        # Fast path: stream-copy concat with CTA pre-normalization to avoid
+        # decoder crashes on players (CTA appended last).
+        fast_ok = False
+        try:
+            fast_ok = concat_with_normalized_cta(clip_paths, final_path)
+        except Exception as e:
+            logger.warning(f"⚠️ Fast concat failed, falling back to cinematic stitch: {e}")
+
+        if fast_ok:
+            return GenerateVideoResponse(
+                video_url=f"/api/video/{os.path.basename(final_path)}",
+                clip_paths=clip_paths,
+                message=f"Successfully generated {request.num_clips} clip(s).",
+            )
+
     if len(clip_paths) > 1:
         ok = stitch_clips(clip_paths, final_path)
         if not ok:
@@ -513,6 +531,7 @@ async def regenerate_clips(request: RegenerateClipsRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Regeneration error: {e}")
 
+    cta_added = False
     # ── Append CTA video ──────────────────────────────────────────────────
     cta_source_path = os.path.join(os.path.dirname(__file__), "assets", "Male CTA 9x16.mp4")
     if os.path.exists(cta_source_path):
@@ -556,6 +575,7 @@ async def regenerate_clips(request: RegenerateClipsRequest):
                 
                 if norm_result.returncode == 0 and os.path.exists(cta_temp_path):
                     clip_paths.append(cta_temp_path)
+                    cta_added = True
                     logger.info(f"✅ CTA normalized and appended ({os.path.getsize(cta_temp_path)//1024} KB, ~{cta_duration:.1f}s)")
                 else:
                     logger.warning(f"⚠️ CTA normalization failed, skipping CTA")
@@ -569,6 +589,20 @@ async def regenerate_clips(request: RegenerateClipsRequest):
 
     # ── Re-stitch ─────────────────────────────────────────────────────────
     final_path = os.path.join(TMP, "superliving_final_ad.mp4")
+    if len(clip_paths) > 1 and cta_added:
+        fast_ok = False
+        try:
+            fast_ok = concat_with_normalized_cta(clip_paths, final_path)
+        except Exception as e:
+            logger.warning(f"⚠️ Fast concat failed during regenerate, falling back: {e}")
+
+        if fast_ok:
+            return RegenerateClipsResponse(
+                video_url=f"/api/video/{os.path.basename(final_path)}",
+                clip_paths=clip_paths,
+                message=f"Successfully regenerated {len(request.clip_indices)} clip(s).",
+            )
+
     if len(clip_paths) > 1:
         ok = stitch_clips(clip_paths, final_path)
         if not ok:
