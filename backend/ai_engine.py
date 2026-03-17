@@ -1,6 +1,4 @@
 """
-AI Engine — Gemini / Veo functions extracted from sl_ad_gen_rahul.py.
-
 🚨 CRITICAL: The system prompts, Veo API payloads, and RAI error handling
 logic in this file are EXACT copies from the original monolith.
 DO NOT alter, "optimize", or rewrite them.

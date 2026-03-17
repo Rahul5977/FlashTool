@@ -90,7 +90,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── API Key (hardcoded — internal tool) ───────────────────────────────────────
-API_KEY="AIzaSyANcnk-hn3ixX_Sju-gmwnVtWlW3bcWVSs"
+API_KEY="Gemini Key goes here"
 
 
 # ── Layout ────────────────────────────────────────────────────────────────────
