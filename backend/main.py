@@ -5,6 +5,7 @@ FFmpeg logic -> video_engine.py.
 
 import logging
 import os
+import shutil
 import tempfile
 
 from dotenv import load_dotenv
@@ -338,12 +339,18 @@ async def generate_video(request: GenerateVideoRequest):
         raise HTTPException(status_code=500, detail=f"Video generation error: {e}")
 
     # ── Append CTA video ──────────────────────────────────────────────────
-    cta_video_path = os.path.join(os.path.dirname(__file__), "assets", "Male CTA 9x16.mp4")
-    if os.path.exists(cta_video_path):
-        clip_paths.append(cta_video_path)
-        logger.info(f"✅ CTA video appended to clip sequence")
+    cta_source_path = os.path.join(os.path.dirname(__file__), "assets", "Male CTA 9x16.mp4")
+    if os.path.exists(cta_source_path):
+        try:
+            # Copy CTA to temp directory (same location as generated clips)
+            cta_temp_path = os.path.join(TMP, "superliving_cta.mp4")
+            shutil.copy2(cta_source_path, cta_temp_path)
+            clip_paths.append(cta_temp_path)
+            logger.info(f"✅ CTA video copied and appended to clip sequence ({os.path.getsize(cta_temp_path)//1024} KB)")
+        except Exception as cta_err:
+            logger.warning(f"⚠️ Failed to copy CTA video: {cta_err} — proceeding without CTA")
     else:
-        logger.warning(f"⚠️ CTA video not found at {cta_video_path} — proceeding without CTA")
+        logger.warning(f"⚠️ CTA video not found at {cta_source_path} — proceeding without CTA")
 
     # ── Stitch ────────────────────────────────────────────────────────────
     final_path = os.path.join(TMP, "superliving_final_ad.mp4")
@@ -466,12 +473,18 @@ async def regenerate_clips(request: RegenerateClipsRequest):
         raise HTTPException(status_code=500, detail=f"Regeneration error: {e}")
 
     # ── Append CTA video ──────────────────────────────────────────────────
-    cta_video_path = os.path.join(os.path.dirname(__file__), "assets", "Male CTA 9x16.mp4")
-    if os.path.exists(cta_video_path):
-        clip_paths.append(cta_video_path)
-        logger.info(f"✅ CTA video appended to clip sequence")
+    cta_source_path = os.path.join(os.path.dirname(__file__), "assets", "Male CTA 9x16.mp4")
+    if os.path.exists(cta_source_path):
+        try:
+            # Copy CTA to temp directory (same location as generated clips)
+            cta_temp_path = os.path.join(TMP, "superliving_cta.mp4")
+            shutil.copy2(cta_source_path, cta_temp_path)
+            clip_paths.append(cta_temp_path)
+            logger.info(f"✅ CTA video copied and appended to clip sequence ({os.path.getsize(cta_temp_path)//1024} KB)")
+        except Exception as cta_err:
+            logger.warning(f"⚠️ Failed to copy CTA video: {cta_err} — proceeding without CTA")
     else:
-        logger.warning(f"⚠️ CTA video not found at {cta_video_path} — proceeding without CTA")
+        logger.warning(f"⚠️ CTA video not found at {cta_source_path} — proceeding without CTA")
 
     # ── Re-stitch ─────────────────────────────────────────────────────────
     final_path = os.path.join(TMP, "superliving_final_ad.mp4")
