@@ -52,7 +52,7 @@ from .api_models import (
     RegenerateClipsRequest,
     RegenerateClipsResponse,
 )
-from .video_engine import stitch_clips
+from .video_engine import stitch_clips, concat_with_normalized_cta
 
 load_dotenv()
 
@@ -383,6 +383,20 @@ async def generate_video(request: GenerateVideoRequest):
     else:
         final_path = clip_paths[0]
 
+    # append CTA
+    cta_appended_path = os.path.join(TMP, "superliving_final_with_cta.mp4")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    cta_video_path = os.path.join(base_dir, "assets", "cta.mp4")
+    
+    if os.path.exists(cta_video_path):
+        cta_success = concat_with_normalized_cta(final_path, cta_video_path, cta_appended_path)
+        if cta_success:
+            final_path = cta_appended_path
+        else:
+             logger.warning("Failed to append CTA.")
+    else:
+         logger.warning(f"CTA video not found at: {cta_video_path}")
+
     return GenerateVideoResponse(
         video_url=f"/api/video/{os.path.basename(final_path)}",
         clip_paths=clip_paths,
@@ -529,6 +543,16 @@ async def regenerate_clips(request: RegenerateClipsRequest):
             final_path = clip_paths[0]
     else:
         final_path = clip_paths[0]
+
+    # append CTA
+    cta_appended_path = os.path.join(TMP, f"superliving_regen_with_cta_{uuid.uuid4().hex[:6]}.mp4")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    cta_video_path = os.path.join(base_dir, "assets", "cta.mp4")
+
+    if os.path.exists(cta_video_path):
+        cta_success = concat_with_normalized_cta(final_path, cta_video_path, cta_appended_path)
+        if cta_success:
+            final_path = cta_appended_path
 
     return RegenerateClipsResponse(
         video_url=f"/api/video/{os.path.basename(final_path)}",

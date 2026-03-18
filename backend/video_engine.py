@@ -394,6 +394,57 @@ def stitch_clips(clip_paths: list, output_path: str, transition_sec: float = 0.3
         return False
 
     except Exception as e:
-        logger.error(f"❌ Stitch error (concat fallback): {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"❌ Unhandled concat fallback error:\n{e}")
         return False
+        
+def _normalize_cta_video(ffmpeg_bin: str, cta_path: str, norm_path: str) -> bool:
+    """Normalize CTA video to ensure it matches the AI clips for concatenation."""
+    r = subprocess.run(
+        [ffmpeg_bin, "-y", "-i", cta_path,
+         "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,format=yuv420p,fps=24",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+         "-ac", "2", "-ar", "44100", "-c:a", "aac", "-b:a", "128k",
+         norm_path],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        logger.error(f"Failed to normalize CTA:\n{r.stderr}")
+        return False
+    return True
+
+def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: str) -> bool:
+    """Appends CTA to the end of a video."""
+    ffmpeg_bin = _get_ffmpeg()
+    
+    norm_cta = os.path.join(TMP, "norm_cta.mp4")
+    if not _normalize_cta_video(ffmpeg_bin, cta_path, norm_cta):
+        return False
+    
+    norm_base = os.path.join(TMP, "norm_base.mp4")
+    r = subprocess.run(
+        [ffmpeg_bin, "-y", "-i", base_vid_path,
+         "-vf", "scale=1080:1920,format=yuv420p,fps=24",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+         "-ac", "2", "-ar", "44100", "-c:a", "aac", "-b:a", "128k",
+         norm_base],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        logger.error(f"Failed to normalize base video for CTA concat:\n{r.stderr}")
+        return False
+
+    concat_file = os.path.join(TMP, "concat_cta.txt")
+    with open(concat_file, "w") as f:
+        f.write(f"file '{norm_base}'\n")
+        f.write(f"file '{norm_cta}'\n")
+
+    r = subprocess.run(
+        [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
+         "-c", "copy", output_path],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        logger.error(f"Failed to concat CTA:\n{r.stderr}")
+        return False
+     
+    return True
