@@ -399,7 +399,8 @@ async def generate_video(request: GenerateVideoRequest):
     # append CTA
     cta_appended_path = _unique_video_path("final_with_cta")
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    cta_video_path = os.path.join(base_dir, "assets", "cta.mp4")
+    project_root = os.path.dirname(base_dir)
+    cta_video_path = os.path.join(project_root, "assets", "cta.mp4")
     
     if os.path.exists(cta_video_path):
         cta_success = concat_with_normalized_cta(final_path, cta_video_path, cta_appended_path)
@@ -564,7 +565,8 @@ async def regenerate_clips(request: RegenerateClipsRequest):
     # append CTA
     cta_appended_path = _unique_video_path("regen_with_cta")
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    cta_video_path = os.path.join(base_dir, "assets", "cta.mp4")
+    project_root = os.path.dirname(base_dir)
+    cta_video_path = os.path.join(project_root, "assets", "cta.mp4")
 
     if os.path.exists(cta_video_path):
         cta_success = concat_with_normalized_cta(final_path, cta_video_path, cta_appended_path)

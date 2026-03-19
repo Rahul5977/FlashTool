@@ -78,8 +78,27 @@ Create the CTA video directory:
 
 ```bash
 mkdir -p backend/assets
-# Place your CTA video here as: backend/assets/cta.mp4
+# Place your CTA video here as: assets/cta.mp4
 ```
+
+## Setting Up S3 for Deployment (Optional)
+
+For deploying the backend on AWS, set up an S3 bucket:
+
+1. Create an S3 bucket in the AWS console
+2. Configure bucket policy to allow public read access (for video files)
+3. Note the bucket name and region
+
+Update `.env` with S3 details:
+
+```env
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
+AWS_S3_BUCKET=your-bucket-name
+AWS_REGION=your-region
+```
+
+---
 
 ### 6. Run the Backend
 
@@ -159,4 +178,3 @@ POST /api/regenerate-clips
 ```http
 GET /api/video/{filename}
 ```
-
