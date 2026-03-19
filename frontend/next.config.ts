@@ -24,7 +24,7 @@ const nextConfig: NextConfig = {
           },
           {
             key: "Access-Control-Allow-Origin",
-            value: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
+            value: process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000",
           },
         ],
       },
