@@ -53,10 +53,18 @@ interface WorkerSession {
   clipPaths: string[];
 }
 
-function createSession(id: string, label: string): WorkerSession {
+// Use a ref-based counter so it survives re-renders without being in state
+// and doesn't cause stale-closure issues.
+let _uidCounter = 1;
+function nextUid() {
+  _uidCounter += 1;
+  return _uidCounter;
+}
+
+function createSession(uid: number): WorkerSession {
   return {
-    id,
-    label,
+    id: `s${uid}`,
+    label: `Worker ${uid}`,
     phase: "input",
     loading: false,
     error: null,
@@ -80,13 +88,11 @@ function createSession(id: string, label: string): WorkerSession {
   };
 }
 
-let sessionCounter = 1;
-
 /* ─── Page Component ────────────────────────────────────────────────────── */
 
 export default function Home() {
   const [sessions, setSessions] = useState<WorkerSession[]>([
-    createSession("s1", "Worker 1"),
+    createSession(1),
   ]);
   const [activeSessionId, setActiveSessionId] = useState<string>("s1");
 
@@ -94,6 +100,7 @@ export default function Home() {
 
   /* ── Session helpers ─────────────────────────────────────────────────── */
 
+  // Always use the functional setSessions form so mutations are never stale.
   const updateSession = useCallback(
     (id: string, patch: Partial<WorkerSession>) => {
       setSessions((prev) =>
@@ -103,33 +110,54 @@ export default function Home() {
     []
   );
 
-  const addWorker = () => {
-    sessionCounter += 1;
-    const id = `s${sessionCounter}`;
-    const label = `Worker ${sessionCounter}`;
-    setSessions((prev) => [...prev, createSession(id, label)]);
-    setActiveSessionId(id);
-  };
+  // Read a single session's latest value by extracting it inside setSessions.
+  // Returns a Promise that resolves to the session snapshot.
+  const readSession = useCallback(
+    (id: string): Promise<WorkerSession> =>
+      new Promise((resolve, reject) => {
+        setSessions((prev) => {
+          const found = prev.find((s) => s.id === id);
+          if (found) resolve(found);
+          else reject(new Error(`Session ${id} not found`));
+          return prev; // no mutation
+        });
+      }),
+    []
+  );
 
-  const removeWorker = (id: string) => {
-    setSessions((prev) => {
-      const remaining = prev.filter((s) => s.id !== id);
-      if (remaining.length === 0) return prev; // keep at least one
-      return remaining;
-    });
-    setSessions((prev) => {
-      if (activeSessionId === id && prev.length > 0) {
-        setActiveSessionId(prev[0].id);
-      }
-      return prev;
-    });
-  };
+  const addWorker = useCallback(() => {
+    const uid = nextUid();
+    const newSession = createSession(uid);
+    setSessions((prev) => [...prev, newSession]);
+    setActiveSessionId(newSession.id);
+  }, []);
+
+  const removeWorker = useCallback(
+    (id: string) => {
+      setSessions((prev) => {
+        if (prev.length <= 1) return prev; // always keep at least one
+        const remaining = prev.filter((s) => s.id !== id);
+        // Re-label workers sequentially so numbers stay tidy
+        const relabeled = remaining.map((s, i) => ({
+          ...s,
+          label: `Worker ${i + 1}`,
+        }));
+        // Switch active tab if we just removed the active one
+        if (activeSessionId === id) {
+          setActiveSessionId(relabeled[0].id);
+        }
+        return relabeled;
+      });
+    },
+    [activeSessionId]
+  );
 
   /* ── Phase 1 → Phase 2: Generate Prompts ───────────────────────────── */
 
   const handleGeneratePrompts = useCallback(
     async (sessionId: string) => {
-      const s = sessions.find((x) => x.id === sessionId)!;
+      // Read the latest snapshot — avoids stale closure from outer `sessions`
+      const s = await readSession(sessionId);
       if (!s.script.trim()) {
         updateSession(sessionId, {
           error: "Please paste your ad script before generating.",
@@ -197,14 +225,15 @@ export default function Home() {
         updateSession(sessionId, { loading: false });
       }
     },
-    [sessions, updateSession]
+    [readSession, updateSession]
   );
 
   /* ── Phase 2 → Phase 3: Generate Video ─────────────────────────────── */
 
   const handleGenerateVideo = useCallback(
     async (sessionId: string) => {
-      const s = sessions.find((x) => x.id === sessionId)!;
+      // Read fresh state — avoids stale closure
+      const s = await readSession(sessionId);
       updateSession(sessionId, { error: null, loading: true });
 
       const arMap: Record<string, string> = {
@@ -243,14 +272,15 @@ export default function Home() {
         updateSession(sessionId, { loading: false });
       }
     },
-    [sessions, updateSession]
+    [readSession, updateSession]
   );
 
   /* ── Phase 3: Regenerate Selected Clips ─────────────────────────────── */
 
   const handleRegenerate = useCallback(
     async (sessionId: string, indices: number[]) => {
-      const s = sessions.find((x) => x.id === sessionId)!;
+      // Read fresh state — avoids stale closure
+      const s = await readSession(sessionId);
       updateSession(sessionId, { error: null, loading: true });
 
       const arMap: Record<string, string> = {
@@ -290,22 +320,22 @@ export default function Home() {
         updateSession(sessionId, { loading: false });
       }
     },
-    [sessions, updateSession]
+    [readSession, updateSession]
   );
 
   /* ── Reset session ────────────────────────────────────────────────────── */
 
-  const handleReset = (sessionId: string) => {
+  const handleReset = useCallback((sessionId: string) => {
     setSessions((prev) =>
-      prev.map((s) =>
-        s.id === sessionId
-          ? {
-              ...createSession(s.id, s.label),
-            }
-          : s
-      )
+      prev.map((s) => {
+        if (s.id !== sessionId) return s;
+        const match = s.label.match(/\d+/);
+        const uid = match ? parseInt(match[0], 10) : _uidCounter;
+        const fresh = createSession(uid);
+        return { ...fresh, id: s.id, label: s.label };
+      })
     );
-  };
+  }, []);
 
   /* ── Render ────────────────────────────────────────────────────────────── */
 
@@ -391,15 +421,21 @@ export default function Home() {
                 {sessions.length > 1 && (
                   <button
                     onClick={() => removeWorker(sess.id)}
-                    className="rounded-r-xl border-l border-white/10 px-2 py-2 text-xs text-white/40 transition hover:bg-red-500/20 hover:text-red-400"
+                    className="rounded-r-xl px-2 py-2 text-xs text-white/40 transition hover:bg-red-500/20 hover:text-red-400"
                     style={{
                       background: isActive
                         ? "rgba(37,168,90,0.25)"
                         : "rgba(255,255,255,0.04)",
-                      border: isActive
+                      borderTop: isActive
                         ? "1px solid rgba(37,168,90,0.4)"
                         : "1px solid rgba(255,255,255,0.08)",
-                      borderLeft: "none",
+                      borderRight: isActive
+                        ? "1px solid rgba(37,168,90,0.4)"
+                        : "1px solid rgba(255,255,255,0.08)",
+                      borderBottom: isActive
+                        ? "1px solid rgba(37,168,90,0.4)"
+                        : "1px solid rgba(255,255,255,0.08)",
+                      borderLeft: "1px solid rgba(255,255,255,0.10)",
                     }}
                     title="Remove worker"
                   >
