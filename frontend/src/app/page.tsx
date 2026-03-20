@@ -8,7 +8,9 @@ import PromptVerifier from "@/components/Promptverifier";
 import VideoResult from "@/components/VideoResult";
 import CharacterUpload from "@/components/CharacterUpload";
 import JobsPanel from "@/components/JobsPanel";
-import { useJobPoller, type Job } from "@/hooks/useJobPoller";
+import { useJobPoller } from "@/hooks/useJobPoller";
+import type { Job } from "@/hooks/useJobPoller";
+
 /* ─── Types ─────────────────────────────────────────────────────────────── */
 
 export interface CharacterAnalysis {
@@ -47,9 +49,7 @@ export default function Home() {
 
   // ── Character state ────────────────────────────────────────────────────
   const [usePhotos, setUsePhotos] = useState(false);
-  const [characters, setCharacters] = useState<
-    { name: string; file: File | null }[]
-  >([
+  const [characters, setCharacters] = useState<{ name: string; file: File | null }[]>([
     { name: "", file: null },
     { name: "", file: null },
   ]);
@@ -62,6 +62,32 @@ export default function Home() {
   // ── Result state (Phase 3) ─────────────────────────────────────────────
   const [videoUrl, setVideoUrl] = useState("");
   const [clipPaths, setClipPaths] = useState<string[]>([]);
+
+  // ── Job system ────────────────────────────────────────────────────────
+  const handleJobDone = useCallback((job: Job) => {
+    if (job.result) {
+      setVideoUrl(`${API_BASE}${job.result.video_url}`);
+      setClipPaths(job.result.clip_paths);
+      setPhase("result");
+    }
+  }, []);
+
+  const { jobs, activeJobId, addJob, setActive } = useJobPoller({
+    apiBase: API_BASE,
+    onJobDone: handleJobDone,
+  });
+
+  const handleOpenJob = useCallback(
+    (job: Job) => {
+      if (job.result) {
+        setVideoUrl(`${API_BASE}${job.result.video_url}`);
+        setClipPaths(job.result.clip_paths);
+        setActive(job.id);
+        setPhase("result");
+      }
+    },
+    [setActive]
+  );
 
   /* ─── Phase 1 → Phase 2: Generate Prompts ──────────────────────────── */
 
@@ -85,13 +111,10 @@ export default function Home() {
             formData.append("names", c.name.trim());
             formData.append("photos", c.file as File);
           });
-          const analysisResp = await fetch(
-            `${API_BASE}/api/analyze-characters`,
-            {
-              method: "POST",
-              body: formData,
-            },
-          );
+          const analysisResp = await fetch(`${API_BASE}/api/analyze-characters`, {
+            method: "POST",
+            body: formData,
+          });
           if (!analysisResp.ok) {
             const err = await analysisResp.json().catch(() => ({}));
             throw new Error(err.detail || "Character analysis failed");
@@ -118,8 +141,7 @@ export default function Home() {
           aspect_ratio: arMap[aspectRatio] || "9:16",
           num_clips: numClips,
           language_note: languageNote,
-          has_photos:
-            usePhotos && characters.some((c) => c.name.trim() && c.file),
+          has_photos: usePhotos && characters.some((c) => c.name.trim() && c.file),
         }),
       });
 
@@ -137,16 +159,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [
-    script,
-    extraPrompt,
-    usePhotos,
-    characters,
-    aspectRatio,
-    numClips,
-    languageNote,
-    characterSheet,
-  ]);
+  }, [script, extraPrompt, usePhotos, characters, aspectRatio, numClips, languageNote, characterSheet]);
 
   /* ─── Phase 2 → Phase 2.5: Trigger Claude Verify ───────────────────── */
 
@@ -158,14 +171,14 @@ export default function Home() {
 
   const handleVerifyAccept = useCallback((updatedClips: ClipPrompt[]) => {
     setClips(updatedClips);
-    setPhase("review"); // go back to editor with updated prompts
+    setPhase("review");
   }, []);
 
   const handleVerifySkip = useCallback(() => {
     setPhase("review");
   }, []);
 
-  /* ─── Phase 2 → Phase 3: Generate Video ────────────────────────────── */
+  /* ─── Phase 2 → Phase 3: Generate Video (async) ────────────────────── */
 
   const handleGenerateVideo = useCallback(async () => {
     setError(null);
@@ -177,7 +190,7 @@ export default function Home() {
     };
 
     try {
-      const resp = await fetch(`${API_BASE}/api/generate-video`, {
+      const resp = await fetch(`${API_BASE}/api/generate-video-async`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -194,15 +207,22 @@ export default function Home() {
       }
 
       const data = await resp.json();
-      setVideoUrl(`${API_BASE}${data.video_url}`);
-      setClipPaths(data.clip_paths);
-      setPhase("result");
+      addJob({
+        id:        data.job_id,
+        label:     `Job #${jobs.length + 1} — ${numClips} clips`,
+        status:    "pending",
+        step:      "Queued…",
+        progress:  0,
+        result:    null,
+        error:     null,
+        createdAt: Date.now(),
+      });
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setLoading(false);
     }
-  }, [clips, veoModel, aspectRatio, numClips]);
+  }, [clips, veoModel, aspectRatio, numClips, jobs.length, addJob]);
 
   /* ─── Phase 3: Regenerate Selected Clips ───────────────────────────── */
 
@@ -217,7 +237,7 @@ export default function Home() {
       };
 
       try {
-        const resp = await fetch(`${API_BASE}/api/regenerate-clips`, {
+        const resp = await fetch(`${API_BASE}/api/regenerate-clips-async`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -236,15 +256,23 @@ export default function Home() {
         }
 
         const data = await resp.json();
-        setVideoUrl(`${API_BASE}${data.video_url}`);
-        setClipPaths(data.clip_paths);
+        addJob({
+          id:        data.job_id,
+          label:     `Regen #${jobs.length + 1} — clips ${indices.map((i) => i + 1).join(", ")}`,
+          status:    "pending",
+          step:      "Queued…",
+          progress:  0,
+          result:    null,
+          error:     null,
+          createdAt: Date.now(),
+        });
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "Unknown error");
       } finally {
         setLoading(false);
       }
     },
-    [clips, clipPaths, veoModel, aspectRatio, numClips],
+    [clips, clipPaths, veoModel, aspectRatio, numClips, jobs.length, addJob]
   );
 
   /* ─── Reset ─────────────────────────────────────────────────────────── */
@@ -258,42 +286,15 @@ export default function Home() {
     setCharacterSheet("");
     setPhotoAnalyses({});
   };
-  const handleJobDone = useCallback((job: Job) => {
-    if (!job.result) return;
-    setVideoUrl(`${API_BASE}${job.result.video_url}`);
-    setClipPaths(job.result.clip_paths);
-    setPhase("result");
-    setLoading(false);
-  }, []);
-
-  const handleJobError = useCallback((job: Job) => {
-    setError(job.error ?? "Generation failed. Please try again.");
-    setLoading(false);
-  }, []);
-
-  const { jobs, activeJobId, addJob, setActive } = useJobPoller({
-    apiBase: API_BASE,
-    onJobDone: handleJobDone,
-    onJobError: handleJobError,
-  });
-
-  const handleOpenJob = useCallback(
-    (job: Job) => {
-      if (job.status !== "done" || !job.result) return;
-      setVideoUrl(`${API_BASE}${job.result.video_url}`);
-      setClipPaths(job.result.clip_paths);
-      setActive(job.id);
-      setPhase("result");
-    },
-    [setActive],
-  );
 
   /* ─── Render ────────────────────────────────────────────────────────── */
 
+  const showJobsPanel = jobs.length > 0;
+
   return (
     <main className="min-h-screen">
-      {/* ── Header ──────────────────────────────────────────────────────── */}
       <div className="mx-auto max-w-7xl px-4 pt-6 sm:px-6 lg:px-8">
+        {/* ── Header ──────────────────────────────────────────────────────── */}
         <div
           className="mb-8 flex items-center gap-4 rounded-2xl px-6 py-5"
           style={{
@@ -307,8 +308,7 @@ export default function Home() {
               SuperLiving — Ad Generator
             </h1>
             <p className="mt-0.5 text-sm text-white/80">
-              Transform your scripts into high-impact video ads for Tier 3 &amp;
-              4 India · Powered by AI
+              Transform your scripts into high-impact video ads for Tier 3 &amp; 4 India · Powered by AI
             </p>
           </div>
         </div>
@@ -333,23 +333,13 @@ export default function Home() {
                   className="flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all"
                   style={{
                     background: isActive
-                      ? p === "verify"
-                        ? "rgba(99,102,241,0.2)"
-                        : "rgba(37,168,90,0.2)"
-                      : isDone
-                        ? "rgba(37,168,90,0.1)"
-                        : "rgba(255,255,255,0.05)",
+                      ? p === "verify" ? "rgba(99,102,241,0.2)" : "rgba(37,168,90,0.2)"
+                      : isDone ? "rgba(37,168,90,0.1)" : "rgba(255,255,255,0.05)",
                     color: isActive
-                      ? p === "verify"
-                        ? "#818cf8"
-                        : "#25a85a"
-                      : isDone
-                        ? "#25a85a"
-                        : "rgba(255,255,255,0.3)",
+                      ? p === "verify" ? "#818cf8" : "#25a85a"
+                      : isDone ? "#25a85a" : "rgba(255,255,255,0.3)",
                     border: isActive
-                      ? p === "verify"
-                        ? "1px solid rgba(99,102,241,0.4)"
-                        : "1px solid rgba(37,168,90,0.4)"
+                      ? p === "verify" ? "1px solid rgba(99,102,241,0.4)" : "1px solid rgba(37,168,90,0.4)"
                       : "1px solid transparent",
                   }}
                 >
@@ -359,11 +349,7 @@ export default function Home() {
                 {i < 3 && (
                   <div
                     className="h-px flex-1"
-                    style={{
-                      background: isDone
-                        ? "rgba(37,168,90,0.3)"
-                        : "rgba(255,255,255,0.08)",
-                    }}
+                    style={{ background: isDone ? "rgba(37,168,90,0.3)" : "rgba(255,255,255,0.08)" }}
                   />
                 )}
               </div>
@@ -381,20 +367,18 @@ export default function Home() {
               className="mb-6 rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-3 text-red-300"
             >
               ⚠️ {error}
-              <button
-                onClick={() => setError(null)}
-                className="ml-3 text-red-400 hover:text-red-200"
-              >
-                ✕
-              </button>
+              <button onClick={() => setError(null)} className="ml-3 text-red-400 hover:text-red-200">✕</button>
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* ── Phase Router ──────────────────────────────────────────────── */}
-        <div className="grid gap-6 lg:grid-cols-[1fr_300px]">
-          <div>
+        {/* ── Main layout: content + jobs sidebar ───────────────────────── */}
+        <div className={showJobsPanel ? "grid gap-6 lg:grid-cols-6" : ""}>
+
+          {/* ── Phase Router ────────────────────────────────────────────── */}
+          <div className={showJobsPanel ? "lg:col-span-4" : ""}>
             <AnimatePresence mode="wait">
+
               {phase === "input" && (
                 <motion.div
                   key="input"
@@ -437,36 +421,17 @@ export default function Home() {
                       onClick={handleGeneratePrompts}
                       disabled={loading}
                       className="rounded-xl px-12 py-4 text-lg font-bold text-white transition-all hover:opacity-90 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                      style={{
-                        background: "linear-gradient(90deg, #1a7a3c, #25a85a)",
-                      }}
+                      style={{ background: "linear-gradient(90deg, #1a7a3c, #25a85a)" }}
                     >
                       {loading ? (
                         <span className="flex items-center gap-2">
-                          <svg
-                            className="h-5 w-5 animate-spin"
-                            viewBox="0 0 24 24"
-                          >
-                            <circle
-                              className="opacity-25"
-                              cx="12"
-                              cy="12"
-                              r="10"
-                              stroke="currentColor"
-                              strokeWidth="4"
-                              fill="none"
-                            />
-                            <path
-                              className="opacity-75"
-                              fill="currentColor"
-                              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                            />
+                          <svg className="h-5 w-5 animate-spin" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                           </svg>
                           Generating Prompts…
                         </span>
-                      ) : (
-                        "🎬  Generate Prompts"
-                      )}
+                      ) : "🎬  Generate Prompts"}
                     </button>
                   </div>
                 </motion.div>
@@ -530,15 +495,29 @@ export default function Home() {
                   />
                 </motion.div>
               )}
+
             </AnimatePresence>
           </div>
-          <aside className="lg:sticky lg:top-6 lg:self-start">
-            <JobsPanel
-              jobs={jobs}
-              activeJobId={activeJobId}
-              onOpenJob={handleOpenJob}
-            />
-          </aside>
+
+          {/* ── Jobs sidebar ─────────────────────────────────────────────── */}
+          {showJobsPanel && (
+            <div className="lg:col-span-2">
+              <div
+                className="sticky top-6 rounded-2xl p-4"
+                style={{
+                  background: "rgba(255,255,255,0.03)",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                }}
+              >
+                <JobsPanel
+                  jobs={jobs}
+                  activeJobId={activeJobId}
+                  onOpenJob={handleOpenJob}
+                />
+              </div>
+            </div>
+          )}
+
         </div>
 
         {/* ── Footer ────────────────────────────────────────────────────── */}

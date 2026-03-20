@@ -15,8 +15,6 @@ export interface Job {
   createdAt: number;
 }
 
-
-
 interface UseJobPollerOptions {
   apiBase: string;
   /** Called when a job transitions to "done" */
@@ -26,14 +24,16 @@ interface UseJobPollerOptions {
   /** Poll interval in ms. Default 3000. */
   pollIntervalMs?: number;
 }
-function mapStatus(backendStatus: string): JobStatus {
+
+/** Map backend state strings → frontend JobStatus */
+function mapStatus(backendStatus: string, message: string): JobStatus {
   switch (backendStatus) {
     case "pending":   return "pending";
-    case "running":   return "generating";
+    case "running":   return message.toLowerCase().includes("stitch") ? "stitching" : "generating";
     case "done":      return "done";
     case "failed":
     case "cancelled": return "error";
-    default:          return "pending";
+    default:          return "generating";
   }
 }
 
@@ -76,46 +76,51 @@ export function useJobPoller({
           const res = await fetch(`${apiBase}/api/job-status/${jobId}`);
           if (!res.ok) return;
           const data = await res.json();
-          const mappedStatus = mapStatus(data.status);
+
+          const status = mapStatus(data.status, data.message ?? "");
+          const result =
+            data.video_url
+              ? { video_url: data.video_url, clip_paths: data.clip_paths ?? [], message: data.message ?? "" }
+              : null;
+
           setJobs((prev) =>
             prev.map((j) =>
               j.id === jobId
                 ? {
                     ...j,
-                    status: mappedStatus,
-                    step: data.step ?? j.step,
+                    status,
+                    step:     data.message ?? j.step,
                     progress: data.progress ?? j.progress,
-                    result: data.result ?? j.result,
-                    error: data.error ?? j.error,
+                    result:   result ?? j.result,
+                    error:    data.error ?? j.error,
                   }
                 : j
             )
           );
 
-          if (data.status === "done") {
+          if (status === "done") {
             stopPolling(jobId);
-            // Fire callback with the updated job
             const updatedJob: Job = {
-              id: jobId,
-              label: "",
-              status: "done",
-              step: data.step ?? "Complete!",
-              progress: 100,
-              result: data.result,
-              error: null,
+              id:        jobId,
+              label:     "",
+              status:    "done",
+              step:      data.message ?? "Complete!",
+              progress:  100,
+              result,
+              error:     null,
               createdAt: 0,
             };
             onJobDoneRef.current?.(updatedJob);
-          } else if (data.status === "error") {
+          } else if (status === "error") {
             stopPolling(jobId);
             const updatedJob: Job = {
-              id: jobId,
-              label: "",
-              status: "error",
-              step: "Failed",
-              progress: 0,
-              result: null,
-              error: data.error,
+              id:        jobId,
+              label:     "",
+              status:    "error",
+              step:      "Failed",
+              progress:  0,
+              result:    null,
+              error:     data.error ?? "Unknown error",
               createdAt: 0,
             };
             onJobErrorRef.current?.(updatedJob);
