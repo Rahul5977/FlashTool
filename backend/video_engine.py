@@ -398,7 +398,7 @@ def stitch_clips(clip_paths: list, output_path: str, transition_sec: float = 0.3
         return False
         
 def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: str,
-                               pause_sec: float = 0.5) -> bool:
+                               pause_sec: float = 0.2) -> bool:
     """
     Append *cta_path* after *base_vid_path* with an optional black-frame pause,
     then write the result to *output_path*.
