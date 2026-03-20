@@ -1,31 +1,31 @@
 """
-SuperLiving Ad Generator API
-AI logic -> ai_engine.py | FFmpeg logic -> video_engine.py
-Production-ready: AWS deployment, parallel workers, security hardening
+SuperLiving Ad Generator — FastAPI Backend
+AI logic     → ai_engine.py
+FFmpeg logic → video_engine.py
+Async jobs   → this file (threading-based job store)
 """
 
-import asyncio
+from __future__ import annotations
+
+import base64
 import logging
 import os
-import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
-from typing import Optional
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.security import HTTPBearer
+from fastapi.responses import FileResponse
 from google import genai
 from google.genai import types
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from .ai_agents import (
     auto_generate_character_image,
@@ -43,6 +43,7 @@ from .ai_engine import (
     generate_clip_from_image,
     generate_clip_text_only,
     generate_clip_with_frame_context,
+    get_clip_character_photo,
     rephrase_blocked_prompt,
     sanitize_prompt_for_veo,
 )
@@ -57,34 +58,17 @@ from .api_models import (
     GeneratePromptsResponse,
     GenerateVideoRequest,
     GenerateVideoResponse,
-    JobStatusResponse,
     RegenerateClipsRequest,
     RegenerateClipsResponse,
 )
-from .video_engine import concat_with_normalized_cta, stitch_clips
+from .video_engine import stitch_clips, concat_with_normalized_cta
 
 load_dotenv()
 
-# ── Logging ────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TMP = tempfile.gettempdir()
-MAX_RETRIES = 3
-
-# ── Parallel job state ─────────────────────────────────────────────────────
-# Stores {job_id: {"status": str, "progress": int, "result": dict|None, "error": str|None}}
-_jobs: dict[str, dict] = {}
-# Thread pool for background video generation (up to 4 parallel workers)
-_executor = ThreadPoolExecutor(max_workers=4)
-
-
-# ── Security: allowed file types for uploads ───────────────────────────────
-ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
-MAX_UPLOAD_SIZE_MB = 10
 
 
 def _unique_video_path(tag: str) -> str:
@@ -94,115 +78,70 @@ def _unique_video_path(tag: str) -> str:
     )
 
 
-def _sanitize_filename(filename: str) -> str:
-    """Strip path traversal and dangerous chars from uploaded filenames."""
-    return re.sub(r"[^\w.\-]", "_", os.path.basename(filename))
+# ─────────────────────────────────────────────────────────────────────────────
+# Async Job Store
+# ─────────────────────────────────────────────────────────────────────────────
+
+class JobState(str, Enum):
+    PENDING   = "pending"
+    RUNNING   = "running"
+    DONE      = "done"
+    FAILED    = "failed"
+    CANCELLED = "cancelled"
 
 
-
-def _normalize_clip(raw: dict) -> dict:
-    """
-    Gemini occasionally returns the `prompt` (or other string fields) as a
-    structured dict instead of a flat string, e.g.:
-        {"OUTFIT & APPEARANCE": "...", "ACTION": "...", ...}
-
-    Flatten any non-string values into KEY:\nVALUE blocks before the data
-    reaches Pydantic, preventing ValidationError on every clip.
-    Applied to all clips returned by build_clip_prompts / build_director_prompts.
-    """
-    import json as _json
-
-    def _to_str(v) -> str:
-        if isinstance(v, str):
-            return v
-        if isinstance(v, dict):
-            return "\n\n".join(
-                f"{k}:\n{val}" if val else str(k) for k, val in v.items()
-            )
-        if v is None:
-            return ""
-        return _json.dumps(v, ensure_ascii=False)
-
-    return {
-        "clip":          raw.get("clip", 0),
-        "scene_summary": _to_str(raw.get("scene_summary", "")),
-        "last_frame":    _to_str(raw.get("last_frame", "")),
-        "prompt":        _to_str(raw.get("prompt", "")),
-    }
+@dataclass
+class Job:
+    job_id: str
+    state: JobState = JobState.PENDING
+    progress: int = 0          # 0–100
+    current_clip: int = 0      # 1-based, which clip is currently rendering
+    total_clips: int = 0
+    message: str = "Queued…"
+    video_url: Optional[str] = None
+    clip_paths: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+    cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
-# ── Rate limiting (simple in-memory, replace with Redis for multi-instance) ─
-_rate_limit: dict[str, list[float]] = {}
-RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "30"))
-RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+_jobs: Dict[str, Job] = {}
+_jobs_lock = threading.Lock()
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Skip rate limiting for health checks
-        if request.url.path == "/api/health":
-            return await call_next(request)
-
-        client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
-        now = time.time()
-        window_start = now - RATE_LIMIT_WINDOW
-
-        if client_ip not in _rate_limit:
-            _rate_limit[client_ip] = []
-
-        # Purge old entries
-        _rate_limit[client_ip] = [t for t in _rate_limit[client_ip] if t > window_start]
-
-        if len(_rate_limit[client_ip]) >= RATE_LIMIT_REQUESTS:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Too many requests. Please slow down."},
-            )
-
-        _rate_limit[client_ip].append(now)
-        return await call_next(request)
+def _new_job(total_clips: int) -> Job:
+    jid = str(uuid.uuid4())
+    job = Job(job_id=jid, total_clips=total_clips)
+    with _jobs_lock:
+        _jobs[jid] = job
+    return job
 
 
-# ── App lifecycle ──────────────────────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("🚀 SuperLiving API starting up")
-    yield
-    logger.info("🛑 SuperLiving API shutting down — cleaning up thread pool")
-    _executor.shutdown(wait=False)
+def _get_job(job_id: str) -> Optional[Job]:
+    with _jobs_lock:
+        return _jobs.get(job_id)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FastAPI App
+# ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="SuperLiving Ad Generator API",
     version="2.0.0",
-    description="AI-powered video ad generation — production build",
-    lifespan=lifespan,
-    # Disable docs in production for security
-    docs_url=None if os.getenv("ENVIRONMENT") == "production" else "/docs",
-    redoc_url=None if os.getenv("ENVIRONMENT") == "production" else "/redoc",
+    description="AI-powered video ad generation using Gemini + Veo",
 )
-
-# ── CORS ───────────────────────────────────────────────────────────────────
-_allowed_origins_raw = os.getenv("FRONTEND_URL", "http://localhost:3000")
-_allowed_origins = [o.strip() for o in _allowed_origins_raw.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
-    expose_headers=["X-Request-ID"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-app.add_middleware(GZipMiddleware, minimum_size=1000)
-app.add_middleware(RateLimitMiddleware)
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────
 
 def _get_api_key() -> str:
-    key = os.getenv("GOOGLE_API_KEY", "").strip()
+    key = os.getenv("GOOGLE_API_KEY", "")
     if not key:
         raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured on server.")
     return key
@@ -211,236 +150,434 @@ def _get_api_key() -> str:
 def _get_clients() -> tuple:
     api_key = _get_api_key()
     gemini_client = genai.Client(api_key=api_key)
-    video_client = genai.Client(api_key=api_key, http_options={"api_version": "v1alpha"})
+    video_client  = genai.Client(api_key=api_key, http_options={"api_version": "v1alpha"})
     return gemini_client, video_client
 
 
-def _update_job(job_id: str, **kwargs):
-    if job_id in _jobs:
-        _jobs[job_id].update(kwargs)
+# ─────────────────────────────────────────────────────────────────────────────
+# Core video-generation logic (shared by sync + async paths)
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-# ── Core video generation logic (runs in thread pool) ─────────────────────
-
-def _run_generate_video_job(
-    job_id: str,
-    clips: list,
+def _run_generate_video_core(
+    clips: List[Any],
     veo_model: str,
     aspect_ratio: str,
     num_clips: int,
-    characters: list = None,
-):
+    anchor_image_b64: str = "",
+    existing_clip_paths: Optional[List[str]] = None,
+    indices_to_regen: Optional[List[int]] = None,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> Dict[str, Any]:
     """
-    Blocking video generation — executed in a background thread.
-    Updates _jobs[job_id] throughout.
+    Shared rendering loop used by both the sync endpoint (legacy) and the
+    async background threads.
+
+    - For full generation:  existing_clip_paths=None, indices_to_regen=None
+    - For partial regen:    existing_clip_paths=list of current paths,
+                            indices_to_regen=0-based list of clips to redo
+
+    progress_callback(current_clip_1based, total_clips, message) is called
+    before each clip render so the job store can report live progress.
     """
-    try:
-        gemini_client, video_client = _get_clients()
-        api_key = _get_api_key()
+    gemini_client, video_client = _get_clients()
+    api_key = _get_api_key()
 
-        clip_paths: list[str] = []
-        total = len(clips)
+    is_regen = indices_to_regen is not None and existing_clip_paths is not None
+    clip_paths: List[str] = list(existing_clip_paths) if is_regen else []
+    MAX_RETRIES = 3
 
-        anchor_image_b64 = ""
-        if characters:
-            for char in characters:
-                if getattr(char, "reference_image_base64", ""):
-                    anchor_image_b64 = char.reference_image_base64
-                    break
+    # Which clips are we actually rendering?
+    if is_regen:
+        render_targets = sorted(indices_to_regen)
+    else:
+        render_targets = list(range(len(clips)))
 
-        for i, clip in enumerate(clips):
-            _update_job(
-                job_id,
-                status="generating",
-                step=f"Generating clip {i + 1}/{total}: {clip.scene_summary}",
-                progress=int((i / total) * 80),
+    for render_order, i in enumerate(render_targets):
+        clip = clips[i]
+        clip_label = f"clip {clip.clip if hasattr(clip, 'clip') else i+1}/{num_clips}"
+        scene = clip.scene_summary if hasattr(clip, "scene_summary") else ""
+
+        if progress_callback:
+            progress_callback(
+                render_order + 1,
+                len(render_targets),
+                f"Rendering {clip_label}: {scene[:60]}…",
             )
 
-            current_prompt = clip.prompt
-            operation = None
+        logger.info(f"🎥 {clip_label}: {scene}")
+        current_prompt = clip.prompt if hasattr(clip, "prompt") else clip.get("prompt", "")
+        operation = None
 
-            # Pre-sanitize
+        # Pre-sanitize
+        try:
+            sanitized = sanitize_prompt_for_veo(gemini_client, current_prompt, i + 1)
+            if sanitized and len(sanitized) > 100:
+                current_prompt = sanitized
+        except Exception as san_err:
+            logger.warning(f"⚠️ Sanitizer failed ({san_err}) — using original prompt")
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            if attempt > 1:
+                current_prompt = rephrase_blocked_prompt(gemini_client, current_prompt, attempt)
+
             try:
-                sanitized = sanitize_prompt_for_veo(gemini_client, current_prompt, clip.clip)
-                if sanitized and len(sanitized) > 100:
-                    current_prompt = sanitized
-            except Exception as san_err:
-                logger.warning(f"Sanitizer failed ({san_err}) — using original prompt")
-
-            for attempt in range(1, MAX_RETRIES + 1):
-                if attempt > 1:
-                    current_prompt = rephrase_blocked_prompt(gemini_client, current_prompt, attempt)
-
-                try:
-                    if i == 0:
-                        if anchor_image_b64:
-                            operation = generate_clip_from_image(
-                                video_client, veo_model, current_prompt,
-                                aspect_ratio, clip.clip, num_clips, anchor_image_b64,
-                            )
-                        else:
-                            operation = generate_clip_text_only(
-                                video_client, veo_model, current_prompt,
-                                aspect_ratio, clip.clip, num_clips,
-                            )
-                    else:
-                        prev_path = clip_paths[i - 1]
-                        next_summary = clips[i].scene_summary if i < len(clips) else ""
-                        operation, current_prompt = generate_clip_with_frame_context(
-                            video_client, gemini_client, veo_model, current_prompt,
-                            aspect_ratio, clip.clip, num_clips, prev_path, next_summary,
+                if i == 0:
+                    # Clip 1: reference photo I2V or text-only fallback
+                    if anchor_image_b64:
+                        logger.info("🖼️ Clip 1: I2V from anchor reference image")
+                        img_bytes = base64.b64decode(anchor_image_b64)
+                        operation = generate_clip_from_image(
+                            video_client, veo_model, current_prompt,
+                            aspect_ratio, i + 1, num_clips,
+                            img_bytes, "image/jpeg",
                         )
-                except Exception as gen_err:
-                    err_str = str(gen_err)
-                    RETRYABLE = ("503", "Deadline", "Broken pipe", "Errno 32",
-                                 "ConnectionReset", "RemoteDisconnected", "Connection reset",
-                                 "timed out", "timeout")
-                    if any(e in err_str for e in RETRYABLE) and attempt < MAX_RETRIES:
-                        wait = 15 * attempt
-                        logger.warning(f"Clip {clip.clip} transient error (attempt {attempt}) — retry in {wait}s")
-                        time.sleep(wait)
-                        continue
-                    logger.warning(f"Clip {clip.clip} failed (attempt {attempt}) — text-only fallback")
-                    operation = generate_clip_text_only(
-                        video_client, veo_model, current_prompt,
-                        aspect_ratio, clip.clip, num_clips,
+                    else:
+                        logger.info("📝 Clip 1: no anchor image — text-only generation")
+                        operation = generate_clip_text_only(
+                            video_client, veo_model, current_prompt,
+                            aspect_ratio, i + 1, num_clips,
+                        )
+                else:
+                    # Clips 2+: last-frame I2V
+                    prev_path = clip_paths[i - 1]
+                    next_summary = (
+                        clips[i].scene_summary
+                        if hasattr(clips[i], "scene_summary")
+                        else clips[i].get("scene_summary", "")
+                    ) if i < len(clips) else ""
+                    operation, current_prompt = generate_clip_with_frame_context(
+                        video_client, gemini_client,
+                        veo_model, current_prompt, aspect_ratio,
+                        i + 1, num_clips,
+                        prev_path, next_summary,
                     )
 
-                if operation is None:
-                    if attempt < MAX_RETRIES:
-                        continue
-                    raise RuntimeError(f"Clip {clip.clip} timed out after {MAX_RETRIES} attempts.")
-
-                try:
-                    video_obj = extract_generated_video(operation, clip.clip)
-                except RaiCelebrityError:
-                    operation = generate_clip_text_only(
-                        video_client, veo_model, current_prompt,
-                        aspect_ratio, clip.clip, num_clips,
+            except Exception as gen_err:
+                err_str = str(gen_err)
+                RETRYABLE = (
+                    "503", "Deadline", "Broken pipe", "Errno 32",
+                    "ConnectionReset", "RemoteDisconnected", "Connection reset",
+                    "timed out", "timeout",
+                )
+                if any(e in err_str for e in RETRYABLE) and attempt < MAX_RETRIES:
+                    wait = 15 * attempt
+                    logger.warning(
+                        f"⚠️ {clip_label} transient error (attempt {attempt}): "
+                        f"{err_str[:120]} — sleeping {wait}s and retrying…"
                     )
-                    video_obj = extract_generated_video(operation, clip.clip) if operation else None
-                except RaiContentError:
-                    video_obj = None
+                    time.sleep(wait)
+                    continue
+                # Non-retryable — fall back to text-only
+                logger.warning(
+                    f"⚠️ {clip_label} failed (attempt {attempt}): "
+                    f"{err_str[:120]} — falling back to text-only"
+                )
+                operation = generate_clip_text_only(
+                    video_client, veo_model, current_prompt,
+                    aspect_ratio, i + 1, num_clips,
+                )
 
-                if video_obj is not None:
-                    break
-                if attempt == MAX_RETRIES:
-                    raise RuntimeError(f"Clip {clip.clip} failed after {MAX_RETRIES} attempts.")
+            if operation is None:
+                if attempt < MAX_RETRIES:
+                    continue
+                raise RuntimeError(f"{clip_label} timed out after {MAX_RETRIES} attempts.")
 
-            # Save clip
-            clip_path = _unique_video_path(f"clip_{i + 1:02d}")
-            video_bytes = download_video(video_obj.uri, api_key)
-            with open(clip_path, "wb") as f:
-                f.write(video_bytes)
-            clip_paths.append(clip_path)
-            logger.info(f"✅ Clip {clip.clip} saved ({len(video_bytes) // 1024} KB)")
+            try:
+                video_obj = extract_generated_video(operation, i + 1)
+            except RaiCelebrityError:
+                logger.warning(f"🚫 {clip_label}: RAI celebrity — retrying text-only")
+                operation = generate_clip_text_only(
+                    video_client, veo_model, current_prompt,
+                    aspect_ratio, i + 1, num_clips,
+                )
+                video_obj = None
+                if operation:
+                    try:
+                        video_obj = extract_generated_video(operation, i + 1)
+                    except (RaiCelebrityError, RaiContentError):
+                        video_obj = None
+            except RaiContentError:
+                video_obj = None
 
-        # Stitch
-        _update_job(job_id, status="stitching", step="Stitching clips together…", progress=85)
-        final_path = _unique_video_path("final")
-        if len(clip_paths) > 1:
-            ok = stitch_clips(clip_paths, final_path)
-            if not ok:
-                final_path = clip_paths[0]
+            if video_obj is not None:
+                break
+
+            if attempt == MAX_RETRIES:
+                raise RuntimeError(
+                    f"{clip_label} blocked after {MAX_RETRIES} attempts. "
+                    "Try editing the prompt and regenerating."
+                )
+
+        # Save clip
+        if is_regen:
+            clip_path = _unique_video_path(f"clip_{i+1:02d}_regen")
         else:
+            clip_path = _unique_video_path(f"clip_{i+1:02d}")
+
+        video_bytes = download_video(video_obj.uri, api_key)
+        with open(clip_path, "wb") as f:
+            f.write(video_bytes)
+
+        if is_regen:
+            clip_paths[i] = clip_path
+        else:
+            clip_paths.append(clip_path)
+
+        logger.info(f"✅ {clip_label} saved ({len(video_bytes) // 1024} KB)")
+
+    # ── Stitch ────────────────────────────────────────────────────────────────
+    if progress_callback:
+        progress_callback(len(render_targets), len(render_targets), "Stitching clips…")
+
+    tag = "regen_final" if is_regen else "final"
+    final_path = _unique_video_path(tag)
+    if len(clip_paths) > 1:
+        ok = stitch_clips(clip_paths, final_path)
+        if not ok:
             final_path = clip_paths[0]
+    else:
+        final_path = clip_paths[0]
 
-        # Append CTA
-        _update_job(job_id, step="Appending CTA…", progress=93)
-        cta_appended_path = _unique_video_path("final_with_cta")
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(base_dir)
-        cta_video_path = os.path.join(project_root, "assets", "cta.mp4")
+    # ── Append CTA ────────────────────────────────────────────────────────────
+    cta_tag = "regen_with_cta" if is_regen else "final_with_cta"
+    cta_appended_path = _unique_video_path(cta_tag)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(base_dir)
+    cta_video_path = os.path.join(project_root, "assets", "cta.mp4")
 
-        if os.path.exists(cta_video_path):
-            cta_success = concat_with_normalized_cta(final_path, cta_video_path, cta_appended_path)
-            if cta_success:
-                final_path = cta_appended_path
+    if os.path.exists(cta_video_path):
+        cta_success = concat_with_normalized_cta(final_path, cta_video_path, cta_appended_path)
+        if cta_success:
+            final_path = cta_appended_path
+        else:
+            logger.warning("⚠️ Failed to append CTA.")
+    else:
+        logger.warning(f"⚠️ CTA video not found at: {cta_video_path}")
 
-        _update_job(
-            job_id,
-            status="done",
-            step="Complete!",
-            progress=100,
-            result={
-                "video_url": f"/api/video/{os.path.basename(final_path)}",
-                "clip_paths": clip_paths,
-                "message": f"Successfully generated {num_clips} clip(s).",
-            },
+    return {
+        "video_url": f"/api/video/{os.path.basename(final_path)}",
+        "clip_paths": clip_paths,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Background thread workers (for async endpoints)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _thread_generate_video(job: Job, request_data: dict):
+    """Background thread: full video generation."""
+    try:
+        job.state   = JobState.RUNNING
+        job.message = "Initializing Veo clients…"
+        job.progress = 2
+
+        def _cb(clip_num: int, total: int, message: str):
+            if job.cancel_event.is_set():
+                raise RuntimeError("Job cancelled by user")
+            job.current_clip = clip_num
+            job.total_clips  = total
+            # Reserve last 5% for stitching
+            job.progress = max(5, int((clip_num - 1) / max(total, 1) * 90))
+            job.message  = message
+            logger.info(f"[job {job.job_id[:8]}] {message}")
+
+        # Convert plain dicts → ClipPrompt-like objects
+        clips = [_DictObj(c) for c in request_data["clips"]]
+
+        result = _run_generate_video_core(
+            clips=clips,
+            veo_model=request_data["veo_model"],
+            aspect_ratio=request_data["aspect_ratio"],
+            num_clips=request_data["num_clips"],
+            anchor_image_b64=request_data.get("anchor_image_b64", ""),
+            progress_callback=_cb,
         )
 
-    except Exception as e:
-        logger.error(f"Job {job_id} failed: {e}", exc_info=True)
-        _update_job(job_id, status="error", step="Failed", error=str(e))
+        job.video_url  = result["video_url"]
+        job.clip_paths = result["clip_paths"]
+        job.progress   = 100
+        job.message    = "Done! Your ad is ready. 🎉"
+        job.state      = JobState.DONE
+        logger.info(f"✅ Job {job.job_id} done: {result['video_url']}")
+
+    except Exception as exc:
+        if job.cancel_event.is_set():
+            job.state   = JobState.CANCELLED
+            job.message = "Cancelled by user."
+        else:
+            job.state   = JobState.FAILED
+            job.error   = str(exc)
+            job.message = f"Failed: {exc}"
+            logger.exception(f"❌ Job {job.job_id} failed")
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────
+def _thread_regenerate_clips(job: Job, request_data: dict):
+    """Background thread: partial clip regeneration."""
+    try:
+        job.state   = JobState.RUNNING
+        job.message = "Starting clip regeneration…"
+        job.progress = 2
+
+        def _cb(clip_num: int, total: int, message: str):
+            if job.cancel_event.is_set():
+                raise RuntimeError("Job cancelled by user")
+            job.current_clip = clip_num
+            job.total_clips  = total
+            job.progress = max(5, int((clip_num - 1) / max(total, 1) * 90))
+            job.message  = message
+
+        clips = [_DictObj(c) for c in request_data["clips"]]
+
+        result = _run_generate_video_core(
+            clips=clips,
+            veo_model=request_data["veo_model"],
+            aspect_ratio=request_data["aspect_ratio"],
+            num_clips=request_data["num_clips"],
+            existing_clip_paths=request_data["clip_paths"],
+            indices_to_regen=request_data["clip_indices"],
+            progress_callback=_cb,
+        )
+
+        job.video_url  = result["video_url"]
+        job.clip_paths = result["clip_paths"]
+        job.progress   = 100
+        job.message    = "Done! Clips regenerated. 🎉"
+        job.state      = JobState.DONE
+
+    except Exception as exc:
+        if job.cancel_event.is_set():
+            job.state   = JobState.CANCELLED
+            job.message = "Cancelled by user."
+        else:
+            job.state   = JobState.FAILED
+            job.error   = str(exc)
+            job.message = f"Failed: {exc}"
+            logger.exception(f"❌ Regen job {job.job_id} failed")
+
+
+class _DictObj:
+    """Wraps a dict so attribute access works the same as a Pydantic model."""
+    def __init__(self, d: dict):
+        self.__dict__.update(d)
+
+    def get(self, key, default=None):
+        return self.__dict__.get(key, default)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 async def health_check():
-    return {
-        "status": "ok",
-        "environment": os.getenv("ENVIRONMENT", "development"),
-        "active_jobs": sum(1 for j in _jobs.values() if j["status"] in ("pending", "generating", "stitching")),
-    }
+    return {"status": "ok"}
 
 
-@app.post("/api/generate-video", response_model=dict)
-async def generate_video(request: GenerateVideoRequest):
-    """
-    Enqueues a video generation job and returns a job_id immediately.
-    Poll /api/jobs/{job_id} for status.
-    Supports up to 4 parallel jobs via thread pool.
-    """
-    job_id = uuid.uuid4().hex
+# ── Job status polling ────────────────────────────────────────────────────────
 
-    arMap = {
-        "9:16 (Reels / Shorts)": "9:16",
-        "16:9 (YouTube / Landscape)": "16:9",
-    }
-    ar = arMap.get(request.aspect_ratio, request.aspect_ratio)
-
-    _jobs[job_id] = {
-        "status": "pending",
-        "step": "Queued…",
-        "progress": 0,
-        "result": None,
-        "error": None,
-    }
-
-    _executor.submit(
-        _run_generate_video_job,
-        job_id,
-        request.clips,
-        request.veo_model,
-        ar,
-        request.num_clips,
-        getattr(request, "characters", None),
-    )
-
-    return {"job_id": job_id, "message": "Job queued. Poll /api/jobs/{job_id} for status."}
-
-
-@app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
+@app.get("/api/job-status/{job_id}")
 async def get_job_status(job_id: str):
-    """Poll this endpoint to track async video generation progress."""
-    if job_id not in _jobs:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    return JobStatusResponse(job_id=job_id, **_jobs[job_id])
+    job = _get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return {
+        "job_id":       job.job_id,
+        "status":       job.state.value,
+        "progress":     job.progress,
+        "current_clip": job.current_clip,
+        "total_clips":  job.total_clips,
+        "message":      job.message,
+        "video_url":    job.video_url,
+        "clip_paths":   job.clip_paths if job.clip_paths else None,
+        "error":        job.error,
+    }
 
+
+@app.get("/api/cancel-job/{job_id}")
+async def cancel_job(job_id: str):
+    job = _get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    job.cancel_event.set()
+    job.state   = JobState.CANCELLED
+    job.message = "Cancelled by user."
+    return {"cancelled": True}
+
+
+# ── Async video generation (used by the new frontend) ────────────────────────
+
+@app.post("/api/generate-video-async")
+async def generate_video_async(request: GenerateVideoRequest):
+    """
+    Starts video generation in a background thread.
+    Returns {job_id} immediately. Frontend polls /api/job-status/{job_id}.
+    """
+    job = _new_job(total_clips=request.num_clips)
+    request_data = {
+        "clips":            [c.dict() for c in request.clips],
+        "veo_model":        request.veo_model,
+        "aspect_ratio":     request.aspect_ratio,
+        "num_clips":        request.num_clips,
+        "anchor_image_b64": "",  # photo references handled via anchor_image_b64 field if needed
+    }
+    t = threading.Thread(
+        target=_thread_generate_video,
+        args=(job, request_data),
+        daemon=True,
+        name=f"veo-{job.job_id[:8]}",
+    )
+    t.start()
+    logger.info(f"🚀 Async job {job.job_id} started (thread {t.name})")
+    return {"job_id": job.job_id}
+
+
+@app.post("/api/regenerate-clips-async")
+async def regenerate_clips_async(request: RegenerateClipsRequest):
+    """
+    Starts clip regeneration in a background thread.
+    Returns {job_id} immediately.
+    """
+    job = _new_job(total_clips=len(request.clip_indices))
+    request_data = {
+        "clips":        [c.dict() for c in request.clips],
+        "clip_paths":   list(request.clip_paths),
+        "clip_indices": list(request.clip_indices),
+        "veo_model":    request.veo_model,
+        "aspect_ratio": request.aspect_ratio,
+        "num_clips":    request.num_clips,
+    }
+    t = threading.Thread(
+        target=_thread_regenerate_clips,
+        args=(job, request_data),
+        daemon=True,
+        name=f"veo-regen-{job.job_id[:8]}",
+    )
+    t.start()
+    logger.info(f"🚀 Async regen job {job.job_id} started — clips {request.clip_indices}")
+    return {"job_id": job.job_id}
+
+
+# ── Agentic pipeline ──────────────────────────────────────────────────────────
 
 @app.post("/api/agentic-pipeline", response_model=AgenticPipelineResponse)
 async def agentic_pipeline(request: AgenticPipelineRequest):
+    """
+    Orchestrates Phases 1-3 of the SuperLiving Auto-Director pipeline:
+      Phase 1 — Parser Agent: Gemini extracts characters from the script.
+      Phase 2 — Imagen Agent: generates 9:16 reference faces for each character.
+      Phase 3 — Director Agent: Gemini splits the script into Veo 3.1 clip prompts.
+    Returns characters (with reference images) + clip prompts for Phase 4 (Human Review).
+    """
     gemini_client, _ = _get_clients()
     api_key = _get_api_key()
 
-    logger.info("🎬 Phase 1 — Parsing characters…")
+    logger.info("🎬 Phase 1 — Parsing characters from script…")
     try:
         characters_json = parse_script_for_characters(gemini_client, request.script)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Phase 1 failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Phase 1 (Parser Agent) failed: {e}")
 
-    logger.info("🖼️ Phase 2 — Generating reference images…")
+    logger.info("🖼️ Phase 2 — Generating reference images via Imagen…")
     character_profiles: list[CharacterProfile] = []
     for char in characters_json.get("characters", []):
         ref_image_b64 = ""
@@ -451,7 +588,8 @@ async def agentic_pipeline(request: AgenticPipelineRequest):
                 char.get("outfit", ""),
             )
         except Exception as e:
-            logger.warning(f"Imagen failed for {char.get('name', '?')}: {e}")
+            logger.warning(f"⚠️ Imagen failed for {char.get('name', '?')}: {e}")
+
         character_profiles.append(CharacterProfile(
             id=char.get("id", ""),
             name=char.get("name", ""),
@@ -462,29 +600,38 @@ async def agentic_pipeline(request: AgenticPipelineRequest):
 
     logger.info("🎥 Phase 3 — Building director prompts…")
     try:
-        clips = build_director_prompts(gemini_client, request.script, characters_json, request.num_clips)
+        clips = build_director_prompts(
+            gemini_client, request.script, characters_json, request.num_clips,
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Phase 3 failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Phase 3 (Director Agent) failed: {e}")
 
     return AgenticPipelineResponse(
         characters=character_profiles,
-        clips=[ClipPrompt(**_normalize_clip(c)) for c in clips],
-        message=f"Pipeline complete — {len(character_profiles)} character(s), {len(clips)} clip(s).",
+        clips=[ClipPrompt(**c) for c in clips],
+        message=(
+            f"Pipeline complete — {len(character_profiles)} character(s) extracted, "
+            f"{len(clips)} clip prompt(s) generated. Ready for Phase 4 (Human Review)."
+        ),
     )
 
+
+# ── Analyze character photos ──────────────────────────────────────────────────
 
 @app.post("/api/analyze-characters", response_model=AnalyzeCharactersResponse)
 async def analyze_characters(
     names: list[str] = Form(...),
     photos: list[UploadFile] = File(...),
 ):
+    """
+    Accepts uploaded images + character names.
+    Runs analyze_character_photo for each, returns locked JSON appearance/outfit.
+    """
     if len(names) != len(photos):
-        raise HTTPException(status_code=400, detail="Names and photos count must match.")
-
-    # Validate uploads
-    for photo in photos:
-        if photo.content_type not in ALLOWED_IMAGE_TYPES:
-            raise HTTPException(status_code=400, detail=f"File type {photo.content_type} not allowed.")
+        raise HTTPException(
+            status_code=400,
+            detail="Number of names must match number of photos.",
+        )
 
     gemini_client, _ = _get_clients()
     analyses: dict[str, CharacterAnalysis] = {}
@@ -494,8 +641,6 @@ async def analyze_characters(
         if not name:
             continue
         photo_bytes = await photo.read()
-        if len(photo_bytes) > MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-            raise HTTPException(status_code=413, detail=f"Photo for {name} exceeds {MAX_UPLOAD_SIZE_MB}MB limit.")
         mime_type = photo.content_type or "image/jpeg"
         try:
             result = analyze_character_photo(gemini_client, name, photo_bytes, mime_type)
@@ -507,8 +652,14 @@ async def analyze_characters(
     return AnalyzeCharactersResponse(analyses=analyses)
 
 
+# ── Generate prompts ──────────────────────────────────────────────────────────
+
 @app.post("/api/generate-prompts", response_model=GeneratePromptsResponse)
 async def generate_prompts(request: GeneratePromptsRequest):
+    """
+    Accepts the script, character data, and settings.
+    Runs build_clip_prompts and returns the array of prompts for user review.
+    """
     gemini_client, _ = _get_clients()
 
     character_sheet = request.character_sheet
@@ -539,158 +690,79 @@ async def generate_prompts(request: GeneratePromptsRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prompt generation failed: {e}")
 
-    return GeneratePromptsResponse(clips=[ClipPrompt(**_normalize_clip(c)) for c in clips], character_sheet=character_sheet)
-
-
-@app.post("/api/regenerate-clips", response_model=dict)
-async def regenerate_clips(request: RegenerateClipsRequest):
-    """Async regeneration — returns job_id, poll /api/jobs/{job_id}."""
-    job_id = uuid.uuid4().hex
-
-    arMap = {
-        "9:16 (Reels / Shorts)": "9:16",
-        "16:9 (YouTube / Landscape)": "16:9",
-    }
-    ar = arMap.get(request.aspect_ratio, request.aspect_ratio)
-
-    clips_to_regen = [request.clips[i] for i in sorted(request.clip_indices)]
-
-    _jobs[job_id] = {
-        "status": "pending",
-        "step": "Queued for regeneration…",
-        "progress": 0,
-        "result": None,
-        "error": None,
-    }
-
-    def _regen_job():
-        try:
-            gemini_client, video_client = _get_clients()
-            api_key = _get_api_key()
-            clip_paths = list(request.clip_paths)
-            total = len(request.clip_indices)
-
-            for step_idx, idx in enumerate(sorted(request.clip_indices)):
-                clip = request.clips[idx]
-                _update_job(
-                    job_id,
-                    status="generating",
-                    step=f"Regenerating clip {clip.clip}/{request.num_clips}…",
-                    progress=int((step_idx / total) * 80),
-                )
-                current_prompt = clip.prompt
-
-                try:
-                    sanitized = sanitize_prompt_for_veo(gemini_client, current_prompt, clip.clip)
-                    if sanitized and len(sanitized) > 100:
-                        current_prompt = sanitized
-                except Exception:
-                    pass
-
-                operation = None
-                for attempt in range(1, MAX_RETRIES + 1):
-                    if attempt > 1:
-                        current_prompt = rephrase_blocked_prompt(gemini_client, current_prompt, attempt)
-                    try:
-                        if idx == 0:
-                            operation = generate_clip_text_only(
-                                video_client, request.veo_model, current_prompt,
-                                ar, clip.clip, request.num_clips,
-                            )
-                        else:
-                            prev_path = clip_paths[idx - 1]
-                            operation, current_prompt = generate_clip_with_frame_context(
-                                video_client, gemini_client, request.veo_model, current_prompt,
-                                ar, clip.clip, request.num_clips, prev_path, clip.scene_summary,
-                            )
-                    except Exception as gen_err:
-                        logger.warning(f"Regen clip {clip.clip} failed: {gen_err}")
-                        operation = generate_clip_text_only(
-                            video_client, request.veo_model, current_prompt,
-                            ar, clip.clip, request.num_clips,
-                        )
-
-                    if operation is None:
-                        continue
-
-                    try:
-                        video_obj = extract_generated_video(operation, clip.clip)
-                    except (RaiCelebrityError, RaiContentError):
-                        video_obj = None
-
-                    if video_obj is not None:
-                        break
-
-                clip_path = _unique_video_path(f"clip_{idx + 1:02d}")
-                video_bytes = download_video(video_obj.uri, api_key)
-                with open(clip_path, "wb") as f:
-                    f.write(video_bytes)
-                clip_paths[idx] = clip_path
-
-            _update_job(job_id, step="Re-stitching…", progress=88)
-            final_path = _unique_video_path("regen_final")
-            if len(clip_paths) > 1:
-                ok = stitch_clips(clip_paths, final_path)
-                if not ok:
-                    final_path = clip_paths[0]
-            else:
-                final_path = clip_paths[0]
-
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            project_root = os.path.dirname(base_dir)
-            cta_video_path = os.path.join(project_root, "assets", "cta.mp4")
-            cta_appended_path = _unique_video_path("regen_with_cta")
-            if os.path.exists(cta_video_path):
-                cta_success = concat_with_normalized_cta(final_path, cta_video_path, cta_appended_path)
-                if cta_success:
-                    final_path = cta_appended_path
-
-            _update_job(
-                job_id,
-                status="done",
-                step="Complete!",
-                progress=100,
-                result={
-                    "video_url": f"/api/video/{os.path.basename(final_path)}",
-                    "clip_paths": clip_paths,
-                    "message": f"Regenerated {len(request.clip_indices)} clip(s).",
-                },
-            )
-        except Exception as e:
-            logger.error(f"Regen job {job_id} failed: {e}", exc_info=True)
-            _update_job(job_id, status="error", step="Failed", error=str(e))
-
-    _executor.submit(_regen_job)
-    return {"job_id": job_id, "message": "Regeneration queued."}
-
-
-@app.get("/api/video/{filename}")
-async def serve_video(filename: str):
-    """Serve generated video — filename validated against path traversal."""
-    # Strict validation: only alphanumeric, dots, underscores, hyphens
-    if not re.match(r"^[\w.\-]+\.mp4$", filename):
-        raise HTTPException(status_code=400, detail="Invalid filename.")
-
-    path = os.path.join(TMP, filename)
-    # Ensure the resolved path is still inside TMP (prevents traversal)
-    if not os.path.realpath(path).startswith(os.path.realpath(TMP)):
-        raise HTTPException(status_code=400, detail="Invalid path.")
-
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Video file not found.")
-
-    return FileResponse(
-        path,
-        media_type="video/mp4",
-        filename=filename,
-        headers={"Cache-Control": "public, max-age=3600"},
+    return GeneratePromptsResponse(
+        clips=[ClipPrompt(**c) for c in clips],
+        character_sheet=character_sheet,
     )
 
 
-# ── Global error handler ───────────────────────────────────────────────────
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled error on {request.url.path}: {exc}", exc_info=True)
-    # Don't leak internal details in production
-    detail = str(exc) if os.getenv("ENVIRONMENT") != "production" else "Internal server error."
-    return JSONResponse(status_code=500, content={"detail": detail})
+# ── Sync generate-video (legacy — kept for backward compat) ──────────────────
+
+@app.post("/api/generate-video", response_model=GenerateVideoResponse)
+async def generate_video(request: GenerateVideoRequest):
+    """
+    Synchronous video generation — DEPRECATED in favour of /api/generate-video-async.
+    Kept here so any existing callers don't break. New frontend uses the async endpoint.
+    NOTE: This will timeout on large jobs (>2 min) for most HTTP clients.
+    """
+    anchor_image_b64 = ""
+    if hasattr(request, "characters") and request.characters:
+        for char in request.characters:
+            if getattr(char, "reference_image_base64", ""):
+                anchor_image_b64 = char.reference_image_base64
+                logger.info(f"🖼️ Clip 1 anchor image found for '{char.name}'")
+                break
+
+    try:
+        result = _run_generate_video_core(
+            clips=request.clips,
+            veo_model=request.veo_model,
+            aspect_ratio=request.aspect_ratio,
+            num_clips=request.num_clips,
+            anchor_image_b64=anchor_image_b64,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return GenerateVideoResponse(
+        video_url=result["video_url"],
+        clip_paths=result["clip_paths"],
+        message=f"Successfully generated {request.num_clips} clip(s).",
+    )
+
+
+# ── Sync regenerate-clips (legacy) ───────────────────────────────────────────
+
+@app.post("/api/regenerate-clips", response_model=RegenerateClipsResponse)
+async def regenerate_clips(request: RegenerateClipsRequest):
+    """
+    Synchronous clip regeneration — DEPRECATED in favour of /api/regenerate-clips-async.
+    """
+    try:
+        result = _run_generate_video_core(
+            clips=request.clips,
+            veo_model=request.veo_model,
+            aspect_ratio=request.aspect_ratio,
+            num_clips=request.num_clips,
+            existing_clip_paths=list(request.clip_paths),
+            indices_to_regen=list(request.clip_indices),
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return RegenerateClipsResponse(
+        video_url=result["video_url"],
+        clip_paths=result["clip_paths"],
+        message=f"Successfully regenerated {len(request.clip_indices)} clip(s).",
+    )
+
+
+# ── Serve generated videos ────────────────────────────────────────────────────
+
+@app.get("/api/video/{filename}")
+async def serve_video(filename: str):
+    """Serve a generated video file from the temp directory."""
+    path = os.path.join(TMP, filename)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Video file not found.")
+    return FileResponse(path, media_type="video/mp4", filename=filename)
