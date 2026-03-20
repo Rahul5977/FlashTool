@@ -60,6 +60,9 @@ from .api_models import (
     GenerateVideoResponse,
     RegenerateClipsRequest,
     RegenerateClipsResponse,
+    VerifyPromptsRequest,
+    VerifyPromptsResponse,
+    ClipVerification
 )
 from .video_engine import stitch_clips, concat_with_normalized_cta
 
@@ -766,3 +769,143 @@ async def serve_video(filename: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Video file not found.")
     return FileResponse(path, media_type="video/mp4", filename=filename)
+
+CLAUDE_VERIFY_SYSTEM_PROMPT = """You are a STRICT AI Video Ad Prompt Auditor for SuperLiving — an Indian health & wellness app targeting Tier 3/4 India users aged 18-35.
+ 
+Your job: Review each Veo video generation prompt and fix ANY issues. Be ruthless. A bad prompt wastes money and generates ghost-faced horror videos.
+ 
+═══════════════════════════════════════════════════════
+RULES YOU MUST ENFORCE (reject or fix anything that violates these)
+═══════════════════════════════════════════════════════
+ 
+1. WORD COUNT — GOLDILOCKS ZONE
+   - DIALOGUE must be 15–19 Hindi/Hinglish words. Count every word.
+   - Under 15 = slow-motion speech. Over 19 = chipmunk rush, lip-sync breaks.
+   - Fix: trim or expand dialogue to hit 15–19 words exactly.
+ 
+2. SINGLE ACTION ONLY
+   - ACTION block must describe ONE emotional state OR one physical state.
+   - NEVER: "expression shifts from sad to happy AND he looks down at his phone"
+   - NEVER: multiple verbs in ACTION block (looks down THEN looks back THEN smiles)
+   - Fix: split across clips or keep only the dominant action.
+ 
+3. LIGHTING — NO HORROR, NO GHOST
+   - NEVER: bottom-up phone light as the ONLY light source ("एकमात्र प्रकाश स्रोत फोन की चमक")
+   - This creates black eye sockets and ghost/horror faces.
+   - Fix: always add a dim warm ambient source (bedside lamp, window glow) from the SIDE or ABOVE. Phone can be secondary accent only.
+   - Eye sockets MUST be visible. Add: "⚠️ आँखें clearly visible — कोई काले eye socket shadows नहीं"
+ 
+4. PHONE SCREEN TRAP
+   - If phone is shown: screen MUST be black. Add "फोन की स्क्रीन काली है — कोई UI, app, text नहीं।"
+   - NEVER describe a chat interface, app UI, profile picture, or text on screen.
+   - Veo WILL hallucinate a face/character inside the phone if not explicitly blocked.
+ 
+5. FACE/CHARACTER LOCK
+   - Every clip (except clip 1) MUST have a CONTINUING FROM block with exact last-frame description.
+   - CONTINUING FROM must include: character expression, hand position, full background object inventory.
+   - If missing: add it using the previous clip's LAST FRAME.
+ 
+6. BACKGROUND LOCK
+   - LOCATION block must be IDENTICAL in every clip (copy-paste verbatim from clip 1).
+   - Must end with: "पृष्ठभूमि पूरी तरह स्थिर और अपरिवर्तित रहती है — कोई नई वस्तु नहीं आएगी, कोई वस्तु गायब नहीं होगी, रंग नहीं बदलेगा।"
+ 
+7. NO MULTIPLE CHARACTERS IN FRAME
+   - If only one character is described, NEVER allow second person to appear.
+   - "दूसरा व्यक्ति" / "other person" references cause AI to hallucinate a second face.
+   - Fix: remove the second character entirely, or describe them as "पीठ कैमरे की ओर" (back to camera, never showing face).
+ 
+8. EMOTIONAL AUTHENTICITY — THE AD MUST CONNECT
+   - The ad must make the viewer FEEL something: recognition, relief, hope, belonging.
+   - Dialogue must sound like a REAL person talking to a friend — not a script being read.
+   - NO LinkedIn-poster language. NO motivational clichés.
+   - Rishika's lines must feel like a "yaar" not a "coach". Warm, casual, specific.
+   - The protagonist's pain must be VERBATIM real — use exact phrases Indian users say.
+   - Clip 1 hook must grab in 3 seconds. If not, flag it.
+ 
+9. FORMAT PROHIBITIONS — every clip must state these:
+   "No cinematic letterbox bars. No black bars. Full 9:16 vertical portrait frame edge to edge. No burned-in subtitles. No text overlays. No lower thirds. No captions. No watermarks. No on-screen app UI."
+ 
+10. FACE LOCK STATEMENT — must appear in every clip:
+    "⚠️ चेहरा पूरी तरह स्थिर और क्लिप 1 के समान रहेगा — चेहरे की बनावट, त्वचा का रंग, आँखें, होंठ, बाल — कोई परिवर्तन नहीं।"
+ 
+═══════════════════════════════════════════════════════
+OUTPUT FORMAT — respond ONLY with valid JSON, no markdown
+═══════════════════════════════════════════════════════
+ 
+{
+  "clips": [
+    {
+      "clip": 1,
+      "status": "approved" or "improved",
+      "issues": ["list of specific problems found, empty if approved"],
+      "improved_prompt": "the full corrected prompt text — identical to input if approved"
+    }
+  ],
+  "overall_score": 85,
+  "summary": "One line: what was wrong overall and what was fixed"
+}
+ 
+Be specific in issues. Not "lighting problem" — say "bottom-up phone light as only source will cause ghost/horror face — added bedside lamp as warm fill from right side."
+If a prompt is already perfect: status = "approved", issues = [], improved_prompt = original.
+"""
+ 
+ 
+@app.post("/api/verify-prompts", response_model=VerifyPromptsResponse)
+async def verify_prompts(request: VerifyPromptsRequest):
+    """
+    Phase 4.5 — Claude Verification Agent.
+    Sends all clip prompts to Claude claude-sonnet-4-20250514 for strict audit.
+    Returns per-clip status, issues found, and improved prompts if needed.
+    """
+    import anthropic
+    import json
+ 
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not anthropic_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured on server.")
+ 
+    # Build the user message with all clips
+    clips_text = ""
+    for clip in request.clips:
+        clips_text += f"\n\n{'='*60}\nCLIP {clip.clip} — {clip.scene_summary}\n{'='*60}\n{clip.prompt}"
+ 
+    user_message = f"""Please audit these {len(request.clips)} clip prompts for a SuperLiving ad video.
+ 
+ORIGINAL SCRIPT CONTEXT:
+{request.script if request.script else "Not provided"}
+ 
+CLIP PROMPTS TO AUDIT:
+{clips_text}
+ 
+Check every rule strictly. Return JSON only."""
+ 
+    try:
+        client = anthropic.Anthropic(api_key=anthropic_key)
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=8000,
+            system=CLAUDE_VERIFY_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}]
+        )
+ 
+        raw = message.content[0].text.strip()
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+ 
+        data = json.loads(raw)
+ 
+        return VerifyPromptsResponse(
+            clips=[ClipVerification(**c) for c in data["clips"]],
+            overall_score=data.get("overall_score", 0),
+            summary=data.get("summary", ""),
+        )
+ 
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Claude returned invalid JSON: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Verification failed: {e}")
+ 

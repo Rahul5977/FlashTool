@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import ConfigPanel from "@/components/ConfigPanel";
 import PromptEditor from "@/components/PromptEditor";
+import PromptVerifier from "@/components/Promptverifier";
 import VideoResult from "@/components/VideoResult";
 import CharacterUpload from "@/components/CharacterUpload";
 
@@ -21,401 +22,178 @@ export interface ClipPrompt {
   prompt: string;
 }
 
-type Phase = "input" | "review" | "generating" | "result";
+// "verify" is the new phase between "review" and "result"
+type Phase = "input" | "review" | "verify" | "result";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-const POLL_INTERVAL_MS = 5000;
 
-/* ─── Job Status Type ───────────────────────────────────────────────────── */
-
-interface JobStatus {
-  job_id: string;
-  status: "pending" | "running" | "done" | "failed";
-  progress: number;
-  current_clip: number;
-  total_clips: number;
-  message: string;
-  video_url?: string;
-  clip_paths?: string[];
-  error?: string;
-}
-
-/* ─── Worker Session Type ───────────────────────────────────────────────── */
-
-interface WorkerSession {
-  id: string;
-  label: string;
-  phase: Phase;
-  loading: boolean;
-  error: string | null;
-  script: string;
-  extraPrompt: string;
-  numClips: number;
-  durationLabel: string;
-  aspectRatio: string;
-  veoModel: string;
-  languageNote: boolean;
-  usePhotos: boolean;
-  characters: { name: string; file: File | null }[];
-  photoAnalyses: Record<string, CharacterAnalysis>;
-  clips: ClipPrompt[];
-  characterSheet: string;
-  jobId: string | null;
-  jobStatus: JobStatus | null;
-  videoUrl: string;
-  clipPaths: string[];
-}
-
-let _uidCounter = 1;
-function nextUid() { _uidCounter += 1; return _uidCounter; }
-
-function createSession(uid: number): WorkerSession {
-  return {
-    id: `s${uid}`,
-    label: `Worker ${uid}`,
-    phase: "input",
-    loading: false,
-    error: null,
-    script: "",
-    extraPrompt: "",
-    numClips: 6,
-    durationLabel: "45s",
-    aspectRatio: "9:16 (Reels / Shorts)",
-    veoModel: "veo-3.1-generate-preview",
-    languageNote: true,
-    usePhotos: false,
-    characters: [{ name: "", file: null }, { name: "", file: null }],
-    photoAnalyses: {},
-    clips: [],
-    characterSheet: "",
-    jobId: null,
-    jobStatus: null,
-    videoUrl: "",
-    clipPaths: [],
-  };
-}
-
-/* ─── Spinner ───────────────────────────────────────────────────────────── */
-
-function Spinner({ size = 5 }: { size?: number }) {
-  const cls = `h-${size} w-${size}`;
-  return (
-    <svg className={`${cls} animate-spin`} viewBox="0 0 24 24" fill="none">
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-    </svg>
-  );
-}
-
-/* ─── Generating Progress Panel ─────────────────────────────────────────── */
-
-function GeneratingPanel({ session, onCancel }: { session: WorkerSession; onCancel: () => void }) {
-  const js = session.jobStatus;
-  const progress = js?.progress ?? 0;
-  const currentClip = js?.current_clip ?? 0;
-  const totalClips = js?.total_clips ?? session.numClips;
-  const message = js?.message ?? "Starting…";
-  const status = js?.status ?? "pending";
-  const failed = status === "failed";
-
-  return (
-    <div className="mx-auto max-w-xl">
-      <div
-        className="rounded-2xl border p-8 text-center"
-        style={{ background: "rgba(255,255,255,0.04)", borderColor: "rgba(37,168,90,0.25)" }}
-      >
-        <div className="mb-6 flex justify-center">
-          <div
-            className="flex h-20 w-20 items-center justify-center rounded-full"
-            style={{ background: "rgba(37,168,90,0.12)" }}
-          >
-            <span className="text-4xl">{failed ? "❌" : "🎬"}</span>
-          </div>
-        </div>
-
-        <h2 className="mb-2 text-xl font-bold text-white">
-          {failed ? "Generation Failed" : `${session.label} — Generating Video`}
-        </h2>
-
-        {!failed && (
-          <p className="mb-6 text-sm text-white/50">
-            Veo renders each clip in ~3–6 minutes. You can switch to other workers while this runs.
-          </p>
-        )}
-
-        {/* Progress bar */}
-        {!failed && (
-          <div className="mb-4">
-            <div className="mb-2 flex justify-between text-xs text-white/40">
-              <span>{currentClip > 0 ? `Clip ${currentClip} / ${totalClips}` : "Initializing…"}</span>
-              <span>{progress}%</span>
-            </div>
-            <div className="h-3 w-full overflow-hidden rounded-full bg-white/10">
-              <motion.div
-                className="h-full rounded-full"
-                style={{ background: "linear-gradient(90deg, #1a7a3c, #25a85a)" }}
-                animate={{ width: `${Math.max(progress, 3)}%` }}
-                transition={{ duration: 0.8, ease: "easeOut" }}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Clip bubbles */}
-        {!failed && totalClips > 0 && (
-          <div className="mb-6 flex flex-wrap justify-center gap-2">
-            {Array.from({ length: totalClips }).map((_, i) => {
-              const clipNum = i + 1;
-              const done = currentClip > clipNum;
-              const active = currentClip === clipNum && status === "running";
-              return (
-                <div
-                  key={i}
-                  className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold transition-all"
-                  style={{
-                    background: done ? "rgba(37,168,90,0.8)" : active ? "rgba(37,168,90,0.3)" : "rgba(255,255,255,0.08)",
-                    color: done ? "#fff" : active ? "#7ecfa0" : "rgba(255,255,255,0.3)",
-                    border: active ? "1px solid rgba(37,168,90,0.6)" : "1px solid transparent",
-                  }}
-                >
-                  {done ? "✓" : clipNum}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Status message */}
-        <div
-          className="mb-6 rounded-xl px-4 py-3 text-sm"
-          style={{
-            background: "rgba(255,255,255,0.05)",
-            color: failed ? "#f87171" : "rgba(255,255,255,0.65)",
-          }}
-        >
-          {failed ? (
-            <>
-              <p className="font-semibold">Error</p>
-              <p className="mt-1 text-xs">{js?.error ?? "Unknown error"}</p>
-            </>
-          ) : (
-            <div className="flex items-center justify-center gap-2">
-              <Spinner size={4} />
-              <span>{message}</span>
-            </div>
-          )}
-        </div>
-
-        {!failed && (
-          <p className="mb-4 text-xs text-white/25">Checking progress every 5 seconds…</p>
-        )}
-
-        <button
-          onClick={onCancel}
-          className="rounded-lg border border-white/15 px-4 py-2 text-xs text-white/40 transition hover:bg-white/5 hover:text-white"
-        >
-          {failed ? "← Back to Prompts" : "Cancel / Start Over"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* ─── Page ──────────────────────────────────────────────────────────────── */
+/* ─── Page Component ────────────────────────────────────────────────────── */
 
 export default function Home() {
-  const [sessions, setSessions] = useState<WorkerSession[]>([createSession(1)]);
-  const [activeSessionId, setActiveSessionId] = useState<string>("s1");
-  const pollRefs = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  // ── Phase state ────────────────────────────────────────────────────────
+  const [phase, setPhase] = useState<Phase>("input");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const activeSession = sessions.find((s) => s.id === activeSessionId)!;
+  // ── Config state (Phase 1) ─────────────────────────────────────────────
+  const [script, setScript] = useState("");
+  const [extraPrompt, setExtraPrompt] = useState("");
+  const [numClips, setNumClips] = useState(6);
+  const [durationLabel, setDurationLabel] = useState("45s");
+  const [aspectRatio, setAspectRatio] = useState("9:16 (Reels / Shorts)");
+  const [veoModel, setVeoModel] = useState("veo-3.1-generate-preview");
+  const [languageNote, setLanguageNote] = useState(true);
 
-  useEffect(() => () => { Object.values(pollRefs.current).forEach(clearInterval); }, []);
+  // ── Character state ────────────────────────────────────────────────────
+  const [usePhotos, setUsePhotos] = useState(false);
+  const [characters, setCharacters] = useState<{ name: string; file: File | null }[]>([
+    { name: "", file: null },
+    { name: "", file: null },
+  ]);
+  const [, setPhotoAnalyses] = useState<Record<string, CharacterAnalysis>>({});
 
-  /* ── Helpers ──────────────────────────────────────────────────────────── */
+  // ── Prompts state (Phase 2) ────────────────────────────────────────────
+  const [clips, setClips] = useState<ClipPrompt[]>([]);
+  const [characterSheet, setCharacterSheet] = useState("");
 
-  const updateSession = useCallback((id: string, patch: Partial<WorkerSession>) => {
-    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
-  }, []);
+  // ── Result state (Phase 3) ─────────────────────────────────────────────
+  const [videoUrl, setVideoUrl] = useState("");
+  const [clipPaths, setClipPaths] = useState<string[]>([]);
 
-  // Read the freshest copy of a session without relying on closure
-  const readSession = useCallback(
-    (id: string): Promise<WorkerSession> =>
-      new Promise((resolve, reject) => {
-        setSessions((prev) => {
-          const found = prev.find((s) => s.id === id);
-          if (found) resolve({ ...found });
-          else reject(new Error(`Session ${id} not found`));
-          return prev; // no state mutation
-        });
-      }),
-    []
-  );
+  /* ─── Phase 1 → Phase 2: Generate Prompts ──────────────────────────── */
 
-  const addWorker = useCallback(() => {
-    const uid = nextUid();
-    const s = createSession(uid);
-    setSessions((prev) => [...prev, s]);
-    setActiveSessionId(s.id);
-  }, []);
+  const handleGeneratePrompts = useCallback(async () => {
+    if (!script.trim()) {
+      setError("Please paste your ad script before generating.");
+      return;
+    }
+    setError(null);
+    setLoading(true);
 
-  const removeWorker = useCallback(
-    (id: string) => {
-      if (pollRefs.current[id]) { clearInterval(pollRefs.current[id]); delete pollRefs.current[id]; }
-      setSessions((prev) => {
-        if (prev.length <= 1) return prev;
-        const kept = prev.filter((s) => s.id !== id);
-        const relabeled = kept.map((s, i) => ({ ...s, label: `Worker ${i + 1}` }));
-        if (activeSessionId === id) setActiveSessionId(relabeled[0].id);
-        return relabeled;
-      });
-    },
-    [activeSessionId]
-  );
+    try {
+      let localPhotoAnalyses: Record<string, CharacterAnalysis> = {};
 
-  /* ── Polling ──────────────────────────────────────────────────────────── */
-
-  const startPolling = useCallback(
-    (sessionId: string, jobId: string) => {
-      if (pollRefs.current[sessionId]) clearInterval(pollRefs.current[sessionId]);
-
-      const poll = async () => {
-        try {
-          const resp = await fetch(`${API_BASE}/api/job-status/${jobId}`);
-          if (!resp.ok) { console.warn(`Poll ${resp.status} — retrying`); return; }
-          const status: JobStatus = await resp.json();
-
-          updateSession(sessionId, { jobStatus: status });
-
-          if (status.status === "done" && status.video_url) {
-            clearInterval(pollRefs.current[sessionId]);
-            delete pollRefs.current[sessionId];
-            updateSession(sessionId, {
-              phase: "result",
-              videoUrl: `${API_BASE}${status.video_url}`,
-              clipPaths: status.clip_paths ?? [],
-              jobId: null,
-            });
-          } else if (status.status === "failed") {
-            clearInterval(pollRefs.current[sessionId]);
-            delete pollRefs.current[sessionId];
-            // Stay on "generating" — GeneratingPanel shows the error + cancel button
+      // Step A: Analyse uploaded character photos
+      if (usePhotos) {
+        const validChars = characters.filter((c) => c.name.trim() && c.file);
+        if (validChars.length > 0) {
+          const formData = new FormData();
+          validChars.forEach((c) => {
+            formData.append("names", c.name.trim());
+            formData.append("photos", c.file as File);
+          });
+          const analysisResp = await fetch(`${API_BASE}/api/analyze-characters`, {
+            method: "POST",
+            body: formData,
+          });
+          if (!analysisResp.ok) {
+            const err = await analysisResp.json().catch(() => ({}));
+            throw new Error(err.detail || "Character analysis failed");
           }
-        } catch (err) {
-          console.warn("Poll error (will retry):", err);
+          const analysisData = await analysisResp.json();
+          localPhotoAnalyses = analysisData.analyses || {};
+          setPhotoAnalyses(localPhotoAnalyses);
         }
-      };
-
-      poll(); // immediate first check
-      pollRefs.current[sessionId] = setInterval(poll, POLL_INTERVAL_MS);
-    },
-    [updateSession]
-  );
-
-  /* ── Phase 1 → 2: Generate Prompts ───────────────────────────────────── */
-
-  const handleGeneratePrompts = useCallback(
-    async (sessionId: string) => {
-      const s = await readSession(sessionId);
-      if (!s.script.trim()) {
-        updateSession(sessionId, { error: "Please paste your ad script before generating." });
-        return;
       }
-      updateSession(sessionId, { error: null, loading: true });
 
-      try {
-        let analyses: Record<string, CharacterAnalysis> = {};
-        if (s.usePhotos) {
-          const validChars = s.characters.filter((c) => c.name.trim() && c.file);
-          if (validChars.length > 0) {
-            const fd = new FormData();
-            for (const c of validChars) { fd.append("names", c.name.trim()); fd.append("photos", c.file!); }
-            const r = await fetch(`${API_BASE}/api/analyze-characters`, { method: "POST", body: fd });
-            if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || "Character analysis failed"); }
-            analyses = (await r.json()).analyses;
-            updateSession(sessionId, { photoAnalyses: analyses });
-          }
-        }
-
-        const resp = await fetch(`${API_BASE}/api/generate-prompts`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            script: s.script,
-            extra_prompt: s.extraPrompt,
-            photo_analyses: analyses,
-            aspect_ratio: s.aspectRatio,
-            num_clips: s.numClips,
-            language_note: s.languageNote,
-            has_photos: s.usePhotos && Object.keys(analyses).length > 0,
-          }),
-        });
-        if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.detail || "Prompt generation failed"); }
-        const data = await resp.json();
-        updateSession(sessionId, { clips: data.clips, characterSheet: data.character_sheet || "", phase: "review" });
-      } catch (e: unknown) {
-        updateSession(sessionId, { error: e instanceof Error ? e.message : "Unknown error" });
-      } finally {
-        updateSession(sessionId, { loading: false });
-      }
-    },
-    [readSession, updateSession]
-  );
-
-  /* ── Phase 2 → 3: Start async video generation ────────────────────────── */
-
-  const handleGenerateVideo = useCallback(
-    async (sessionId: string) => {
-      const s = await readSession(sessionId);
-      updateSession(sessionId, { error: null });
-
+      // Step B: Generate clip prompts
       const arMap: Record<string, string> = {
         "9:16 (Reels / Shorts)": "9:16",
         "16:9 (YouTube / Landscape)": "16:9",
       };
+      const resp = await fetch(`${API_BASE}/api/generate-prompts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          script,
+          extra_prompt: extraPrompt,
+          character_sheet: characterSheet,
+          photo_analyses: localPhotoAnalyses,
+          aspect_ratio: arMap[aspectRatio] || "9:16",
+          num_clips: numClips,
+          language_note: languageNote,
+          has_photos: usePhotos && characters.some((c) => c.name.trim() && c.file),
+        }),
+      });
 
-      try {
-        // This endpoint returns {job_id} immediately — does NOT block
-        const resp = await fetch(`${API_BASE}/api/generate-video-async`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            clips: s.clips,
-            veo_model: s.veoModel,
-            aspect_ratio: arMap[s.aspectRatio] || "9:16",
-            num_clips: s.numClips,
-          }),
-        });
-        if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.detail || "Failed to start video generation"); }
-        const { job_id } = await resp.json();
-
-        updateSession(sessionId, {
-          phase: "generating",
-          jobId: job_id,
-          jobStatus: {
-            job_id,
-            status: "pending",
-            progress: 0,
-            current_clip: 0,
-            total_clips: s.numClips,
-            message: "Job queued, starting Veo rendering…",
-          },
-        });
-
-        startPolling(sessionId, job_id);
-      } catch (e: unknown) {
-        updateSession(sessionId, { error: e instanceof Error ? e.message : "Unknown error" });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Prompt generation failed");
       }
-    },
-    [readSession, updateSession, startPolling]
-  );
 
-  /* ── Phase 3: Regenerate clips (async) ───────────────────────────────── */
+      const data = await resp.json();
+      setClips(data.clips);
+      if (data.character_sheet) setCharacterSheet(data.character_sheet);
+      setPhase("review");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }, [script, extraPrompt, usePhotos, characters, aspectRatio, numClips, languageNote, characterSheet]);
+
+  /* ─── Phase 2 → Phase 2.5: Trigger Claude Verify ───────────────────── */
+
+  const handleGoToVerify = useCallback(() => {
+    setPhase("verify");
+  }, []);
+
+  /* ─── Phase 2.5: Accept verified/improved clips → Phase 3 ──────────── */
+
+  const handleVerifyAccept = useCallback((updatedClips: ClipPrompt[]) => {
+    setClips(updatedClips);
+    setPhase("review"); // go back to editor with updated prompts
+  }, []);
+
+  const handleVerifySkip = useCallback(() => {
+    setPhase("review");
+  }, []);
+
+  /* ─── Phase 2 → Phase 3: Generate Video ────────────────────────────── */
+
+  const handleGenerateVideo = useCallback(async () => {
+    setError(null);
+    setLoading(true);
+
+    const arMap: Record<string, string> = {
+      "9:16 (Reels / Shorts)": "9:16",
+      "16:9 (YouTube / Landscape)": "16:9",
+    };
+
+    try {
+      const resp = await fetch(`${API_BASE}/api/generate-video`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clips,
+          veo_model: veoModel,
+          aspect_ratio: arMap[aspectRatio] || "9:16",
+          num_clips: numClips,
+        }),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Video generation failed");
+      }
+
+      const data = await resp.json();
+      setVideoUrl(`${API_BASE}${data.video_url}`);
+      setClipPaths(data.clip_paths);
+      setPhase("result");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }, [clips, veoModel, aspectRatio, numClips]);
+
+  /* ─── Phase 3: Regenerate Selected Clips ───────────────────────────── */
 
   const handleRegenerate = useCallback(
-    async (sessionId: string, indices: number[]) => {
-      const s = await readSession(sessionId);
-      updateSession(sessionId, { error: null });
+    async (indices: number[]) => {
+      setError(null);
+      setLoading(true);
 
       const arMap: Record<string, string> = {
         "9:16 (Reels / Shorts)": "9:16",
@@ -423,244 +201,254 @@ export default function Home() {
       };
 
       try {
-        const resp = await fetch(`${API_BASE}/api/regenerate-clips-async`, {
+        const resp = await fetch(`${API_BASE}/api/regenerate-clips`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             clip_indices: indices,
-            clips: s.clips,
-            clip_paths: s.clipPaths,
-            veo_model: s.veoModel,
-            aspect_ratio: arMap[s.aspectRatio] || "9:16",
-            num_clips: s.numClips,
+            clips,
+            clip_paths: clipPaths,
+            veo_model: veoModel,
+            aspect_ratio: arMap[aspectRatio] || "9:16",
+            num_clips: numClips,
           }),
         });
-        if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.detail || "Failed to start regeneration"); }
-        const { job_id } = await resp.json();
 
-        updateSession(sessionId, {
-          phase: "generating",
-          jobId: job_id,
-          jobStatus: {
-            job_id,
-            status: "pending",
-            progress: 0,
-            current_clip: 0,
-            total_clips: indices.length,
-            message: `Regenerating clip(s) ${indices.map((i) => i + 1).join(", ")}…`,
-          },
-        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.detail || "Clip regeneration failed");
+        }
 
-        startPolling(sessionId, job_id);
+        const data = await resp.json();
+        setVideoUrl(`${API_BASE}${data.video_url}`);
+        setClipPaths(data.clip_paths);
       } catch (e: unknown) {
-        updateSession(sessionId, { error: e instanceof Error ? e.message : "Unknown error" });
+        setError(e instanceof Error ? e.message : "Unknown error");
+      } finally {
+        setLoading(false);
       }
     },
-    [readSession, updateSession, startPolling]
+    [clips, clipPaths, veoModel, aspectRatio, numClips]
   );
 
-  /* ── Cancel generating ────────────────────────────────────────────────── */
+  /* ─── Reset ─────────────────────────────────────────────────────────── */
 
-  const handleCancelGeneration = useCallback(
-    (sessionId: string) => {
-      if (pollRefs.current[sessionId]) { clearInterval(pollRefs.current[sessionId]); delete pollRefs.current[sessionId]; }
-      updateSession(sessionId, { phase: "review", jobId: null, jobStatus: null, error: null });
-    },
-    [updateSession]
-  );
+  const handleReset = () => {
+    setPhase("input");
+    setClips([]);
+    setVideoUrl("");
+    setClipPaths([]);
+    setError(null);
+    setCharacterSheet("");
+    setPhotoAnalyses({});
+  };
 
-  /* ── Reset ────────────────────────────────────────────────────────────── */
-
-  const handleReset = useCallback((sessionId: string) => {
-    if (pollRefs.current[sessionId]) { clearInterval(pollRefs.current[sessionId]); delete pollRefs.current[sessionId]; }
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.id !== sessionId) return s;
-        const match = s.label.match(/\d+/);
-        const uid = match ? parseInt(match[0], 10) : _uidCounter;
-        const fresh = createSession(uid);
-        return { ...fresh, id: s.id, label: s.label };
-      })
-    );
-  }, []);
-
-  /* ── Render ───────────────────────────────────────────────────────────── */
-
-  const s = activeSession;
-  const isRunning = (sess: WorkerSession) => sess.loading || sess.phase === "generating";
+  /* ─── Render ────────────────────────────────────────────────────────── */
 
   return (
     <main className="min-h-screen">
+      {/* ── Header ──────────────────────────────────────────────────────── */}
       <div className="mx-auto max-w-7xl px-4 pt-6 sm:px-6 lg:px-8">
-
-        {/* Header */}
         <div
-          className="mb-6 flex items-center gap-4 rounded-2xl px-6 py-5"
-          style={{ background: "linear-gradient(90deg, #1a7a3c, #25a85a)", boxShadow: "0 4px 24px rgba(26,122,60,0.35)" }}
+          className="mb-8 flex items-center gap-4 rounded-2xl px-6 py-5"
+          style={{
+            background: "linear-gradient(90deg, #1a7a3c, #25a85a)",
+            boxShadow: "0 4px 24px rgba(26,122,60,0.35)",
+          }}
         >
           <span className="text-4xl">🎬</span>
-          <div className="flex-1">
-            <h1 className="text-2xl font-bold text-white">SuperLiving — Ad Generator</h1>
+          <div>
+            <h1 className="text-2xl font-bold text-white">
+              SuperLiving — Ad Generator
+            </h1>
             <p className="mt-0.5 text-sm text-white/80">
               Transform your scripts into high-impact video ads for Tier 3 &amp; 4 India · Powered by AI
             </p>
           </div>
         </div>
 
-        {/* Worker Tabs */}
-        <div className="mb-6 flex flex-wrap items-center gap-2">
-          {sessions.map((sess) => {
-            const isActive = sess.id === activeSessionId;
-            const running = isRunning(sess);
-            const pct = sess.jobStatus?.progress ?? 0;
-            const phaseEmoji =
-              sess.phase === "result" ? "✅"
-              : sess.phase === "generating" ? "🎬"
-              : sess.phase === "review" ? "✏️"
-              : "⚙️";
-
+        {/* ── Phase Progress Bar ───────────────────────────────────────── */}
+        <div className="mb-6 flex items-center gap-2">
+          {(["input", "review", "verify", "result"] as Phase[]).map((p, i) => {
+            const labels: Record<Phase, string> = {
+              input: "Script",
+              review: "Edit Prompts",
+              verify: "Claude Review",
+              result: "Video",
+            };
+            const phaseOrder: Phase[] = ["input", "review", "verify", "result"];
+            const currentIndex = phaseOrder.indexOf(phase);
+            const thisIndex = phaseOrder.indexOf(p);
+            const isActive = p === phase;
+            const isDone = thisIndex < currentIndex;
             return (
-              <div key={sess.id} className="flex items-center">
-                <button
-                  onClick={() => setActiveSessionId(sess.id)}
-                  className="flex items-center gap-2 rounded-l-xl px-4 py-2 text-sm font-semibold transition-all"
+              <div key={p} className="flex items-center gap-2 flex-1">
+                <div
+                  className="flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all"
                   style={{
-                    background: isActive ? "linear-gradient(90deg, #1a7a3c, #25a85a)" : "rgba(255,255,255,0.06)",
-                    color: isActive ? "#fff" : "rgba(255,255,255,0.55)",
-                    borderTop: isActive ? "1px solid rgba(37,168,90,0.6)" : "1px solid rgba(255,255,255,0.08)",
-                    borderBottom: isActive ? "1px solid rgba(37,168,90,0.6)" : "1px solid rgba(255,255,255,0.08)",
-                    borderLeft: isActive ? "1px solid rgba(37,168,90,0.6)" : "1px solid rgba(255,255,255,0.08)",
-                    borderRight: "none",
+                    background: isActive
+                      ? p === "verify" ? "rgba(99,102,241,0.2)" : "rgba(37,168,90,0.2)"
+                      : isDone ? "rgba(37,168,90,0.1)" : "rgba(255,255,255,0.05)",
+                    color: isActive
+                      ? p === "verify" ? "#818cf8" : "#25a85a"
+                      : isDone ? "#25a85a" : "rgba(255,255,255,0.3)",
+                    border: isActive
+                      ? p === "verify" ? "1px solid rgba(99,102,241,0.4)" : "1px solid rgba(37,168,90,0.4)"
+                      : "1px solid transparent",
                   }}
                 >
-                  {running ? <Spinner size={3} /> : <span className="text-xs">{phaseEmoji}</span>}
-                  {sess.label}
-                  {sess.phase === "generating" && pct > 0 && (
-                    <span className="rounded-full px-1.5 py-0.5 text-[10px] font-bold" style={{ background: "rgba(37,168,90,0.3)", color: "#7ecfa0" }}>
-                      {pct}%
-                    </span>
-                  )}
-                  {sess.phase === "generating" && pct === 0 && <span className="text-xs opacity-60">Starting…</span>}
-                  {sess.loading && <span className="text-xs opacity-60">Thinking…</span>}
-                </button>
-
-                {sessions.length > 1 && (
-                  <button
-                    onClick={() => removeWorker(sess.id)}
-                    className="rounded-r-xl px-2 py-2 text-xs text-white/40 transition hover:bg-red-500/20 hover:text-red-400"
-                    style={{
-                      background: isActive ? "rgba(37,168,90,0.25)" : "rgba(255,255,255,0.04)",
-                      borderTop: isActive ? "1px solid rgba(37,168,90,0.4)" : "1px solid rgba(255,255,255,0.08)",
-                      borderRight: isActive ? "1px solid rgba(37,168,90,0.4)" : "1px solid rgba(255,255,255,0.08)",
-                      borderBottom: isActive ? "1px solid rgba(37,168,90,0.4)" : "1px solid rgba(255,255,255,0.08)",
-                      borderLeft: "1px solid rgba(255,255,255,0.10)",
-                    }}
-                    title="Remove worker"
-                  >
-                    ✕
-                  </button>
+                  <span>{isDone ? "✓" : i + 1}</span>
+                  <span>{labels[p]}</span>
+                </div>
+                {i < 3 && (
+                  <div
+                    className="h-px flex-1"
+                    style={{ background: isDone ? "rgba(37,168,90,0.3)" : "rgba(255,255,255,0.08)" }}
+                  />
                 )}
               </div>
             );
           })}
-
-          <button
-            onClick={addWorker}
-            className="flex items-center gap-1.5 rounded-xl border border-dashed border-[#25a85a]/40 px-4 py-2 text-sm text-[#7ecfa0] transition hover:border-[#25a85a]/70 hover:bg-[#25a85a]/10"
-          >
-            <span className="text-base leading-none">+</span>New Worker
-          </button>
-
-          <span className="ml-auto text-xs text-white/30">
-            {sessions.filter(isRunning).length > 0
-              ? `${sessions.filter(isRunning).length} worker(s) running`
-              : "All workers idle"}
-          </span>
         </div>
 
-        {/* Error Banner */}
+        {/* ── Error Banner ──────────────────────────────────────────────── */}
         <AnimatePresence>
-          {s.error && (
+          {error && (
             <motion.div
-              initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
               className="mb-6 rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-3 text-red-300"
             >
-              ⚠️ {s.error}
-              <button onClick={() => updateSession(s.id, { error: null })} className="ml-3 text-red-400 hover:text-red-200">✕</button>
+              ⚠️ {error}
+              <button onClick={() => setError(null)} className="ml-3 text-red-400 hover:text-red-200">✕</button>
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* Phase Router */}
+        {/* ── Phase Router ──────────────────────────────────────────────── */}
         <AnimatePresence mode="wait">
 
-          {s.phase === "input" && (
-            <motion.div key={`input-${s.id}`} initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} transition={{ duration: 0.3 }}>
+          {phase === "input" && (
+            <motion.div
+              key="input"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              transition={{ duration: 0.3 }}
+            >
               <div className="grid gap-8 lg:grid-cols-5">
                 <div className="lg:col-span-3">
                   <ConfigPanel
-                    script={s.script} setScript={(v) => updateSession(s.id, { script: typeof v === "function" ? v(s.script) : v })}
-                    extraPrompt={s.extraPrompt} setExtraPrompt={(v) => updateSession(s.id, { extraPrompt: typeof v === "function" ? v(s.extraPrompt) : v })}
-                    numClips={s.numClips} setNumClips={(v) => updateSession(s.id, { numClips: typeof v === "function" ? v(s.numClips) : v })}
-                    durationLabel={s.durationLabel} setDurationLabel={(v) => updateSession(s.id, { durationLabel: typeof v === "function" ? v(s.durationLabel) : v })}
-                    aspectRatio={s.aspectRatio} setAspectRatio={(v) => updateSession(s.id, { aspectRatio: typeof v === "function" ? v(s.aspectRatio) : v })}
-                    veoModel={s.veoModel} setVeoModel={(v) => updateSession(s.id, { veoModel: typeof v === "function" ? v(s.veoModel) : v })}
-                    languageNote={s.languageNote} setLanguageNote={(v) => updateSession(s.id, { languageNote: typeof v === "function" ? v(s.languageNote) : v })}
+                    script={script}
+                    setScript={setScript}
+                    extraPrompt={extraPrompt}
+                    setExtraPrompt={setExtraPrompt}
+                    numClips={numClips}
+                    setNumClips={setNumClips}
+                    durationLabel={durationLabel}
+                    setDurationLabel={setDurationLabel}
+                    aspectRatio={aspectRatio}
+                    setAspectRatio={setAspectRatio}
+                    veoModel={veoModel}
+                    setVeoModel={setVeoModel}
+                    languageNote={languageNote}
+                    setLanguageNote={setLanguageNote}
                   />
                 </div>
                 <div className="lg:col-span-2">
                   <CharacterUpload
-                    usePhotos={s.usePhotos} setUsePhotos={(v) => updateSession(s.id, { usePhotos: typeof v === "function" ? v(s.usePhotos) : v })}
-                    characters={s.characters} setCharacters={(v) => updateSession(s.id, { characters: typeof v === "function" ? v(s.characters) : v })}
+                    usePhotos={usePhotos}
+                    setUsePhotos={setUsePhotos}
+                    characters={characters}
+                    setCharacters={setCharacters}
                   />
                 </div>
               </div>
+
               <div className="mt-8 flex justify-center">
                 <button
-                  onClick={() => handleGeneratePrompts(s.id)}
-                  disabled={s.loading}
-                  className="rounded-xl px-10 py-3.5 text-lg font-bold text-white transition-all hover:opacity-90 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={handleGeneratePrompts}
+                  disabled={loading}
+                  className="rounded-xl px-12 py-4 text-lg font-bold text-white transition-all hover:opacity-90 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                   style={{ background: "linear-gradient(90deg, #1a7a3c, #25a85a)" }}
                 >
-                  {s.loading ? <span className="flex items-center gap-2"><Spinner size={5} />Generating Prompts…</span> : "🎬  Generate Prompts"}
+                  {loading ? (
+                    <span className="flex items-center gap-2">
+                      <svg className="h-5 w-5 animate-spin" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      Generating Prompts…
+                    </span>
+                  ) : "🎬  Generate Prompts"}
                 </button>
               </div>
             </motion.div>
           )}
 
-          {s.phase === "review" && (
-            <motion.div key={`review-${s.id}`} initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} transition={{ duration: 0.3 }}>
+          {phase === "review" && (
+            <motion.div
+              key="review"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              transition={{ duration: 0.3 }}
+            >
               <PromptEditor
-                clips={s.clips} setClips={(v) => updateSession(s.id, { clips: typeof v === "function" ? v(s.clips) : v })}
-                characterSheet={s.characterSheet} setCharacterSheet={(v) => updateSession(s.id, { characterSheet: typeof v === "function" ? v(s.characterSheet) : v })}
-                onConfirm={() => handleGenerateVideo(s.id)}
-                onBack={() => updateSession(s.id, { phase: "input" })}
-                loading={s.loading}
+                clips={clips}
+                setClips={setClips}
+                characterSheet={characterSheet}
+                setCharacterSheet={setCharacterSheet}
+                onVerify={handleGoToVerify}
+                onConfirm={handleGenerateVideo}
+                onBack={() => setPhase("input")}
+                loading={loading}
               />
             </motion.div>
           )}
 
-          {s.phase === "generating" && (
-            <motion.div key={`generating-${s.id}`} initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
-              <GeneratingPanel session={s} onCancel={() => handleCancelGeneration(s.id)} />
+          {phase === "verify" && (
+            <motion.div
+              key="verify"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              transition={{ duration: 0.3 }}
+            >
+              <PromptVerifier
+                clips={clips}
+                script={script}
+                onAccept={handleVerifyAccept}
+                onSkip={handleVerifySkip}
+                apiBase={API_BASE}
+              />
             </motion.div>
           )}
 
-          {s.phase === "result" && (
-            <motion.div key={`result-${s.id}`} initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} transition={{ duration: 0.3 }}>
+          {phase === "result" && (
+            <motion.div
+              key="result"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              transition={{ duration: 0.3 }}
+            >
               <VideoResult
-                videoUrl={s.videoUrl}
-                clips={s.clips} setClips={(v) => updateSession(s.id, { clips: typeof v === "function" ? v(s.clips) : v })}
-                numClips={s.numClips}
-                onRegenerate={(indices) => handleRegenerate(s.id, indices)}
-                onReset={() => handleReset(s.id)}
-                loading={false}
+                videoUrl={videoUrl}
+                clips={clips}
+                setClips={setClips}
+                numClips={numClips}
+                onRegenerate={handleRegenerate}
+                onReset={handleReset}
+                loading={loading}
               />
             </motion.div>
           )}
 
         </AnimatePresence>
 
+        {/* ── Footer ────────────────────────────────────────────────────── */}
         <p className="mt-12 pb-8 text-center text-xs text-[#555]">
           SuperLiving Internal Tool · AI-Powered Ad Generator · 8s max per clip
         </p>

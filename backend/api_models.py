@@ -135,3 +135,22 @@ class AgenticPipelineResponse(BaseModel):
     characters: list[CharacterProfile]
     clips: list[ClipPrompt]
     message: str = ""
+    
+# POST /api/verify-prompts
+class VerifyPromptsRequest(BaseModel):
+    clips: list[ClipPrompt]
+    script: str = ""
+ 
+ 
+class ClipVerification(BaseModel):
+    clip: int
+    status: str             # "approved" | "improved"
+    issues: list[str]       # list of what was wrong
+    improved_prompt: str    # same as original if approved, fixed if improved
+ 
+ 
+class VerifyPromptsResponse(BaseModel):
+    clips: list[ClipVerification]
+    overall_score: int      # 0-100
+    summary: str            # one-line verdict
+ 
