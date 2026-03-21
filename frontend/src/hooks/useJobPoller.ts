@@ -55,8 +55,9 @@ export function useJobPoller({
 
   // Cleanup on unmount
   useEffect(() => {
+    const pollers = pollersRef.current;
     return () => {
-      Object.values(pollersRef.current).forEach(clearInterval);
+      Object.values(pollers).forEach(clearInterval);
     };
   }, []);
 
