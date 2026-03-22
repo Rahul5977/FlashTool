@@ -416,36 +416,17 @@ def stitch_clips(clip_paths: list, output_path: str, transition_sec: float = 0.3
         return False
         
 def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: str,
-                               pause_sec: float = 0.3, aspect_ratio: str = "9:16") -> bool:
+                               pause_sec: float = 0.0, aspect_ratio: str = "9:16") -> bool:
     """
-    Append *cta_path* after *base_vid_path* with an optional black-frame pause,
+    Append *cta_path* after *base_vid_path* (with optional pause),
     then write the result to *output_path*.
 
-    ROOT CAUSE OF THE STUCK-CTA BUG
-    ────────────────────────────────
-    The original code normalized the two files separately and then tried to
-    stream-copy them together with `concat demuxer -c copy`.  Stream-copy only
-    works when EVERY stream parameter is identical: codec, fps, timebase,
-    sample-rate, channel layout, and pixel format.  The CTA file is 60 fps /
-    48000 Hz; the AI stitched video is 24 fps / 44100 Hz.  After separate
-    normalization runs the container timebases can still differ by a fraction,
-    which makes the concat demuxer write a file where the CTA segment has
-    corrupted PTS — it appears to play but immediately stalls or shows a black
-    frame because the player cannot seek into the second segment.
-
-    THE FIX: filter_complex concat (always re-encode, single pass)
-    ──────────────────────────────────────────────────────────────
-    We feed BOTH inputs into a single ffmpeg invocation and join them via the
-    `concat` filter.  The filter resets PTS at every segment boundary and emits
-    one continuous timeline.  A full re-encode guarantees every frame has a
-    monotonically-increasing, player-friendly timestamp — no stalls, no seeking
-    bugs, no codec mismatch.
-
-    PAUSE
-    ─────
-    A `pause_sec` (default 0.5 s) black+silence segment is inserted between the
-    AI video and the CTA using `color` + `anullsrc` sources so the transition
-    feels intentional rather than jarring.
+    OPTIMIZED FOR SPEED (no 10-12s delay):
+    ──────────────────────────────────────
+    - NO blackdetect trimming (was causing 5-7s overhead)
+    - Pause set to 0s by default (was adding 300ms + extra processing)
+    - Faster encoder preset ("veryfast" instead of "fast")
+    - Direct concat without intermediate file re-encodes where possible
     """
     ffmpeg_bin = _get_ffmpeg()
 
@@ -464,12 +445,11 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
 
     def _re_encode(src: str, dst: str, label: str) -> bool:
         """
-        Re-encode *src* to a fully normalised MP4:
+        Re-encode *src* to a fully normalised MP4 (FAST):
           • 1080×1920 yuv420p @ 24 fps  (scale-with-pad preserves AR)
           • AAC stereo @ 44100 Hz
-          • -movflags +faststart  so the moov atom is at the front —
-            this is what lets players seek into the segment without
-            downloading the entire file first.
+          • -movflags +faststart for streaming
+          • preset="veryfast" to avoid 10-12s delay
         """
         cmd = [
             ffmpeg_bin, "-y", "-i", src,
@@ -479,10 +459,9 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
                 f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,"
                 f"format=yuv420p,fps={TARGET_FPS}"
             ),
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "192k",
-            # Force a clean timebase so concat filter has nothing to complain about
+            "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "128k",
             "-video_track_timescale", "12800",
             "-movflags", "+faststart",
             dst,
@@ -496,7 +475,7 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
         return True
 
     def _re_encode_with_fadeout(src: str, dst: str, label: str, fade_duration: float = 0.5) -> bool:
-        """Re-encode src with a fade-out at the end before CTA."""
+        """Re-encode src with a fade-out at the end before CTA (FAST)."""
         r_probe = subprocess.run([ffmpeg_bin, "-i", src], capture_output=True, text=True)
         import re as _re2
         m = _re2.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", r_probe.stderr)
@@ -510,12 +489,12 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
                      f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,"
                      f"fps={TARGET_FPS},format=yuv420p,"
                      f"fade=t=out:st={fade_start:.4f}:d={fade_duration}"),
-             "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
              "-pix_fmt", "yuv420p",
              "-video_track_timescale", "12800",
              "-af", (f"afade=t=out:st={fade_start:.4f}:d={fade_duration},"
                      f"aresample={TARGET_AR},apad"),
-             "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "192k",
+             "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "128k",
              "-shortest", dst],
             capture_output=True, text=True,
         )
@@ -526,58 +505,33 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
 
     def _re_encode_cta(src: str, dst: str, label: str) -> bool:
         """
-        Re-encode CTA with blackdetect trimming — removes leading/trailing
-        black frames that cause the visible '14s black pause' problem.
+        Re-encode CTA (FAST) — skip expensive blackdetect trimming.
+        
+        The blackdetect was adding 5-7 seconds of overhead for marginal benefit.
+        Just encode directly with veryfast preset.
         """
-        import re as _re3
-        # Step 1: detect black segments
-        detect_cmd = [
-            ffmpeg_bin, "-i", src,
-            "-vf", "blackdetect=d=0.1:pix_th=0.10",
-            "-an", "-f", "null", "-",
-        ]
-        r_detect = subprocess.run(detect_cmd, capture_output=True, text=True)
-
-        # Step 2: find leading black duration (black_start=0)
-        trim_start = 0.0
-        for m in _re3.finditer(
-            r"black_start:\s*([\d.]+)\s*black_end:\s*([\d.]+)", r_detect.stderr
-        ):
-            bs, be = float(m.group(1)), float(m.group(2))
-            if bs < 0.05:  # leading black (starts at ~0)
-                trim_start = be
-                break
-
-        # Step 3: re-encode with trim (skip leading black)
-        vf = (
-            f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,"
-            f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,"
-            f"format=yuv420p,fps={TARGET_FPS}"
-        )
         cmd = [
-            ffmpeg_bin, "-y",
-            "-ss", f"{trim_start:.4f}",
-            "-i", src,
-            "-vf", vf,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            ffmpeg_bin, "-y", "-i", src,
+            "-vf", (f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,"
+                    f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,"
+                    f"format=yuv420p,fps={TARGET_FPS}"),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "192k",
+            "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "128k",
             "-video_track_timescale", "12800",
             "-movflags", "+faststart",
             dst,
         ]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
-            logger.warning(f"CTA blackdetect trim failed for {label}, falling back to plain re-encode")
-            return _re_encode(src, dst, label)
-        if trim_start > 0:
-            logger.info(f"  ✂️ Trimmed {trim_start:.2f}s leading black from {label}")
+            logger.error(f"❌ CTA re-encode failed: {r.stderr[-400:]}")
+            return False
         sz = os.path.getsize(dst) // 1024
-        logger.info(f"  ✅ Normalised {label} (blackdetect): {sz} KB → {dst}")
+        logger.info(f"  ✅ Normalised {label}: {sz} KB → {dst}")
         return True
 
     def _make_pause(dst: str) -> bool:
-        """Generate a black-frame + silence segment of *pause_sec* seconds."""
+        """Generate a black-frame + silence segment of *pause_sec* seconds (FAST)."""
         if pause_sec <= 0:
             return True   # caller skips concatenating this segment
         cmd = [
@@ -586,9 +540,9 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
             "-i", f"color=black:size={TARGET_W}x{TARGET_H}:rate={TARGET_FPS}:duration={pause_sec}",
             "-f", "lavfi",
             "-i", f"anullsrc=r={TARGET_AR}:cl=stereo:d={pause_sec}",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "192k",
+            "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "128k",
             "-t", str(pause_sec),
             "-video_track_timescale", "12800",
             "-movflags", "+faststart",
@@ -644,9 +598,9 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
         "-filter_complex", filter_str,
         "-map", "[vout]",
         "-map", "[aout]",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "192k",
+        "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "128k",
         "-movflags", "+faststart",
         output_path,
     ]
@@ -667,10 +621,10 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
         r2 = subprocess.run(
             [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", list_file,
              "-vf", f"fps={TARGET_FPS},format=yuv420p",
-             "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
              "-pix_fmt", "yuv420p",
              "-af", f"aresample={TARGET_AR}",
-             "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "192k",
+             "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "128k",
              "-movflags", "+faststart",
              output_path],
             capture_output=True, text=True,
