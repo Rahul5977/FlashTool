@@ -959,8 +959,51 @@ FLAG if:
 
 RULE12: DIAGLOGUE CONTINUITY AND NATURALNESS
     The dialogue across clips must feel like a continuous conversation. Each line should logically follow from the previous one, maintaining the same characters and emotional tone. Avoid any abrupt changes in topic or style that would break the flow of the conversation.
-RULE13: There should not be any special char like "-", ":" in the dialogue text, as it can cause issues with Veo's lip-syncing and may look unnatural. Dialogue should be written in a natural, conversational style without any formatting that would not appear in real speech.
+
+════════════════════════════════════════════════════════════
+RULE 13 — NO DASHES IN DIALOGUE (NEW — CRITICAL FOR SPEECH RHYTHM)
+════════════════════════════════════════════════════════════
+INSTANT FLAG: Any '—' (em-dash) or '-' (hyphen) INSIDE dialogue text.
  
+WHY: Veo's voice engine interprets dashes as hard sentence breaks.
+This causes:
+  - Unnatural speech rhythm: voice stops completely at the dash
+  - Wrong word stress: the word after the dash gets new sentence stress
+  - In some cases the word after the dash is swallowed or repeated
+  - The dialogue sounds robotic and mismatched to lip movement
+ 
+EXAMPLES TO FIX:
+  ✗ "Gharwale bol rahe hain — chhod de, ya shaadi kar le."
+  ✓ "Gharwale bol rahe hain, bole chhod de ya shaadi kar le."
+ 
+  ✗ "Pehla — socha hoga. Nahi hua."
+  ✓ "Pehle socha hoga. Nahi hua."
+ 
+  ✗ "Usne bola — yaar, teen baar fail hona..."
+  ✓ "Usne bola, yaar, teen baar fail hona..."
+ 
+  ✗ "Idea mera tha — muh se nikla hi nahi."
+  ✓ "Idea mera tha, par muh se nikla hi nahi."
+ 
+  ✗ "Raat ko neend nahi aa rahi thi — SuperLiving pe Rishika se baat ki."
+  ✓ "Raat ko neend nahi aa rahi thi. SuperLiving pe Rishika se baat ki."
+ 
+REPLACEMENT RULES:
+  '—' for brief pause    → comma (,)
+  '—' for connective     → aur / toh / phir / lekin / par / kyunki
+  '—' before quote       → "X ne bola, Y" (comma after bola, not dash)
+  '—' genuine new sent.  → full stop (.)
+ 
+ ════════════════════════════════════════════════════════════
+RULE 14 — NO SECOND CHARACTER IN FRAME
+════════════════════════════════════════════════════════════
+Only ONE character should be visible on screen at any time.
+A second character's FACE must NEVER appear in the frame.
+Off-screen sounds (laughter, voice) are allowed ONLY in the AUDIO block.
+ 
+FLAG: Any mention of a second person's face, expression, or body in the frame.
+FIX: Remove them entirely. Their presence can only exist as audio OR as the
+on-screen character quoting/recounting what they said.
 The best dialogue sounds like someone telling their friend exactly what happened.
 VERBATIM real user phrases are better than polished scripted lines.
  
