@@ -416,7 +416,7 @@ def stitch_clips(clip_paths: list, output_path: str, transition_sec: float = 0.3
         return False
         
 def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: str,
-                               pause_sec: float = 0.2, aspect_ratio: str = "9:16") -> bool:
+                               pause_sec: float = 0.3, aspect_ratio: str = "9:16") -> bool:
     """
     Append *cta_path* after *base_vid_path* with an optional black-frame pause,
     then write the result to *output_path*.
@@ -524,6 +524,58 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
             return _re_encode(src, dst, label)
         return True
 
+    def _re_encode_cta(src: str, dst: str, label: str) -> bool:
+        """
+        Re-encode CTA with blackdetect trimming — removes leading/trailing
+        black frames that cause the visible '14s black pause' problem.
+        """
+        import re as _re3
+        # Step 1: detect black segments
+        detect_cmd = [
+            ffmpeg_bin, "-i", src,
+            "-vf", "blackdetect=d=0.1:pix_th=0.10",
+            "-an", "-f", "null", "-",
+        ]
+        r_detect = subprocess.run(detect_cmd, capture_output=True, text=True)
+
+        # Step 2: find leading black duration (black_start=0)
+        trim_start = 0.0
+        for m in _re3.finditer(
+            r"black_start:\s*([\d.]+)\s*black_end:\s*([\d.]+)", r_detect.stderr
+        ):
+            bs, be = float(m.group(1)), float(m.group(2))
+            if bs < 0.05:  # leading black (starts at ~0)
+                trim_start = be
+                break
+
+        # Step 3: re-encode with trim (skip leading black)
+        vf = (
+            f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,"
+            f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,"
+            f"format=yuv420p,fps={TARGET_FPS}"
+        )
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-ss", f"{trim_start:.4f}",
+            "-i", src,
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "192k",
+            "-video_track_timescale", "12800",
+            "-movflags", "+faststart",
+            dst,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            logger.warning(f"CTA blackdetect trim failed for {label}, falling back to plain re-encode")
+            return _re_encode(src, dst, label)
+        if trim_start > 0:
+            logger.info(f"  ✂️ Trimmed {trim_start:.2f}s leading black from {label}")
+        sz = os.path.getsize(dst) // 1024
+        logger.info(f"  ✅ Normalised {label} (blackdetect): {sz} KB → {dst}")
+        return True
+
     def _make_pause(dst: str) -> bool:
         """Generate a black-frame + silence segment of *pause_sec* seconds."""
         if pause_sec <= 0:
@@ -554,8 +606,8 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
     if not _re_encode_with_fadeout(base_vid_path, norm_base, "AI video", fade_duration=0.5):
         return False
 
-    logger.info("  🔧 Normalising CTA video…")
-    if not _re_encode(cta_path, norm_cta, "CTA"):
+    logger.info("  🔧 Normalising CTA video (with blackdetect trim)…")
+    if not _re_encode_cta(cta_path, norm_cta, "CTA"):
         return False
 
     # ── Step 2: create pause segment (may be skipped if pause_sec=0) ─────────

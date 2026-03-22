@@ -279,8 +279,9 @@ Pick ONE shot type for the entire video and use it in EVERY clip.
 NEVER mix shot types between clips.
 
 RECOMMENDED for talking-head UGC ads:
-  मीडियम क्लोज-अप शॉट (MCU) — character visible from mid-chest up.
-  This shows face clearly, hides body/hand movement, looks like real UGC.
+  TIGHT मीडियम क्लोज-अप शॉट (MCU) — character visible from chin to mid-chest ONLY.
+  This framing physically prevents hands from appearing in frame.
+  Shows face clearly, eliminates hand gesture glitches at clip boundaries.
 
 FORBIDDEN shot combinations:
   ✗ MCU in clip 1 → Medium shot in clip 2 (body suddenly more visible = jarring)
@@ -294,8 +295,9 @@ POSTURE LOCK:
   SEATED is better for UGC — sitting = intimate, confessional, real.
 
 CAMERA LINE TO USE IN EVERY CLIP:
-  "मीडियम क्लोज-अप शॉट, आई-लेवल पर (STATIC SHOT)।
-  Ultra-sharp focus, 8k resolution, highly detailed. कैमरा बिल्कुल स्थिर।"
+  "TIGHT मीडियम क्लोज-अप शॉट (ठोड़ी से सीने के बीच तक), आई-लेवल पर (STATIC SHOT)।
+  Ultra-sharp focus, 8k resolution, highly detailed. कैमरा बिल्कुल स्थिर।
+  हाथ फ्रेम में नहीं दिखेंगे।"
 
 ════════════════════════════════════════════════════════════
 BACKGROUND FREEZE — MOST CRITICAL ANTI-HALLUCINATION RULE
@@ -391,7 +393,9 @@ REALISM RULES — WHAT MAKES IT LOOK REAL, NOT AI
    no airbrushing, no smoothing." This forces Veo to render real skin.
 
 5. CAMERA: Always STATIC. Never pan, zoom, or track. Static shots = real UGC feel.
-   Shot type: medium close-up (MCU) for talking head. Medium shot (MS) for body language.
+   Shot type: TIGHT medium close-up (MCU) — chin to mid-chest ONLY.
+   This framing physically prevents hands from appearing in frame.
+   NEVER use medium shot (MS) — it shows hands and causes gesture glitches at cuts.
 
 6. HAIR: Specify exact style once in clip 1 — Veo drifts on hair. Repeat verbatim.
    Include: length, texture (straight/wavy/curly), styling (parted/tied/loose).
@@ -414,8 +418,8 @@ Use this exact section order:
 5. ACTION: (STATIC SHOT) [ONE state only. "शरीर बिल्कुल स्थिर रहता है, हाथ नीचे।"]
 6. DIALOGUE: [15–19 words. चरित्र: "(बातचीत के लहजे में...) संवाद"]
 7. AUDIO: [BGM description — same mood/tempo across all clips unless story requires shift]
-8. CAMERA: [Shot type + eye-level + "Ultra-sharp focus, 8k resolution, highly detailed.
-   कैमरा बिल्कुल स्थिर।"]
+8. CAMERA: [TIGHT MCU (chin to mid-chest) + eye-level + "Ultra-sharp focus, 8k resolution,
+   highly detailed. कैमरा बिल्कुल स्थिर। हाथ फ्रेम में नहीं दिखेंगे।"]
 9. LIGHTING: [Dual source description. "⚠️ आँखें clearly visible। कोई काले eye socket
    shadows नहीं। Cinematic contrast, photorealistic skin texture, extremely crisp."]
 10. VISUAL FORMAT PROHIBITIONS: No cinematic letterbox bars. No black bars. Full {ar}
@@ -431,6 +435,7 @@ SELF-CHECK BEFORE OUTPUTTING EACH CLIP
 Before writing each clip's JSON, verify:
 □ Word count of DIALOGUE: counted, 15–19 Hindi words?
 □ ACTION block: exactly ONE state? No transitions? No hand movement?
+□ CAMERA: TIGHT MCU (chin to mid-chest)? Hands physically out of frame?
 □ LIGHTING: two sources? Eyes visible? Ghost face prevented?
 □ LOCATION: verbatim copy from clip 1? Freeze line present?
 □ LAST FRAME: complete? Matches what CONTINUING FROM of next clip will need?
@@ -522,8 +527,8 @@ def build_continuing_from(
         f"Be exhaustively specific — every vague word is a drift risk.\n\n"
         f"MANDATORY — cover ALL of these exactly:\n\n"
         f"1. SHOT TYPE & FRAMING (critical — prevents shot-size drift between clips):\n"
-        f"   State the exact shot: 'medium close-up (character from mid-chest up)'\n"
-        f"   OR 'medium shot (character from waist up)' OR 'close-up (face and shoulders)'\n"
+        f"   State the exact shot: 'TIGHT medium close-up (chin to mid-chest only)'\n"
+        f"   This framing physically prevents hands from appearing in frame.\n"
         f"   The next clip MUST use this EXACT same framing.\n\n"
         f"2. CHARACTER POSTURE:\n"
         f"   Seated or standing? If seated: what surface, which direction facing.\n"

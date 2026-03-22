@@ -959,6 +959,7 @@ FLAG if:
 
 RULE12: DIAGLOGUE CONTINUITY AND NATURALNESS
     The dialogue across clips must feel like a continuous conversation. Each line should logically follow from the previous one, maintaining the same characters and emotional tone. Avoid any abrupt changes in topic or style that would break the flow of the conversation.
+RULE13: There should not be any special char like "-", ":" in the dialogue text, as it can cause issues with Veo's lip-syncing and may look unnatural. Dialogue should be written in a natural, conversational style without any formatting that would not appear in real speech.
  
 The best dialogue sounds like someone telling their friend exactly what happened.
 VERBATIM real user phrases are better than polished scripted lines.
