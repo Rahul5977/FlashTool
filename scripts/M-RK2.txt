@@ -1,0 +1,98 @@
+M-RK-2: "BAAT KAISE SHURU KARU?"
+Format: Reel/DTC | ~29s (3×8s + 1×5s) | Single character throughout
+Target: Shy introvert, 18-27, office or college setup
+Setting: Office pantry / tea area — casual, relatable
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHARACTER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE GUY — 22-24 years old. Sitting at his office desk or in the office
+pantry, looking at camera like he's telling a friend something that
+actually happened today. Slightly awkward energy — the kind of person
+who is self-aware about being awkward.
+
+⚠️ RISHIKA NEVER APPEARS ON SCREEN.
+Her trick is quoted by the Guy in his own voice.
+Second character (chai stall person) is REMOVED — the Guy recounts
+the conversation happened, viewer imagines it. More believable anyway.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SCRIPT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[THE HOOK — recounting the moment, slightly embarrassed, self-aware]
+
+"Aaj chai area mein ek colleague khada tha.
+Main bhi tha. Baat karni thi.
+Andar se bol raha tha — 'kuch bol, kuch bhi bol, bas hi bol de.'"
+
+
+[THE PATTERN — compress the bigger isolation into one line]
+
+"Ye roz hota hai mujhse.
+Lift mein, canteen mein, meeting mein —
+main hoon, log hain, aur main bas... chup."
+
+
+[THE TURN — Rishika's trick, quoted by him]
+
+"Rishika ne ek cheez boli — SuperLiving pe.
+'Yaar, bas itna bol: aaj bahut boring day hai na?
+Saamne wala khud bolta hai.'"
+
+
+[THE PAYOFF — small win, not a transformation. Real.]
+
+"Kiya. Actually kiya.
+Usne bola — bhai bilkul, chal chai pe baat karte hain.
+Ek line. Bas ek line."
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CTA 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Rishika | SuperLiving | ₹149/month
+"Roz ek naya trick. Roz thoda better."
+Download Now
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TONE NOTES FOR GENERATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Hook: recounting with a slightly self-deprecating smile — "andar se bol
+  raha tha" should feel funny and real, not sad. Everyone has been there.
+- Pattern: flat, factual. "Main hoon, log hain, aur main bas... chup."
+  The pause before "chup" matters — that's where the viewer feels it.
+- Rishika's trick: he says it like he's slightly skeptical it'll work,
+  but repeating it anyway. Not excited. Curious.
+- Payoff: small genuine smile. Not a grin — a "wait, that actually worked"
+  expression. The win is tiny and that's exactly why it's believable.
+- NO enthusiasm anywhere. Real introverts don't suddenly become extroverts.
+  One conversation started = one real win.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT CHANGED FROM ORIGINAL + WHY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. INTERNAL VOICEOVER → SPOKEN TO CAMERA
+   "Kuch bol, kuch bhi bol" was marked as internal voiceover —
+   Veo cannot render thoughts. Now the Guy recounts it directly to
+   camera. Same energy, same cringe-recognition, speakable on screen.
+
+2. TEXT OVERLAY SEQUENCE → ONE SPOKEN LINE
+   "Lift mein chup, canteen mein chup..." was a rapid text-overlay
+   sequence — a reel editing technique Veo cannot generate.
+   Compressed into one clean spoken line that covers the same feeling.
+
+3. SECOND CHARACTER (chai area person) → REMOVED
+   The other person walking away, smiling, speaking, walking together
+   required a second AI-generated face with no reference = hallucination.
+   Now the Guy recounts what the person said — viewer imagines them.
+   This is actually MORE believable. Every real testimonial is one person.
+
+4. RISHIKA ON SCREEN → QUOTED BY GUY
+   Same words, delivered by the Guy: "Rishika ne ek cheez boli —"
+   then her exact trick. Zero second character. Zero face switch.
+   The emotional value of her advice is completely preserved.
+
+5. DURATION: 26s → ~29s
+   26s = 3×8s + 2s last clip (under minimum 5s). Restructured to
+   3×8s + 1×5s = 29s. App handles this with custom clip durations.

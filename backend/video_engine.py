@@ -96,6 +96,21 @@ def extract_last_frame(video_path: str) -> bytes:
         return f.read()
 
 
+def extract_frame_at(video_path: str, t: float = 0.5) -> bytes:
+    """Extract a single frame at time t seconds."""
+    ffmpeg_bin = _get_ffmpeg()
+    out_path = video_path.replace(".mp4", f"_frame_{t:.1f}s.jpg")
+    subprocess.run(
+        [ffmpeg_bin, "-y", "-ss", str(t),
+         "-i", video_path, "-vframes", "1", "-q:v", "2", out_path],
+        capture_output=True, text=True,
+    )
+    if not os.path.exists(out_path):
+        raise RuntimeError(f"Could not extract frame at t={t}s from {video_path}")
+    with open(out_path, "rb") as f:
+        return f.read()
+
+
 def trim_clip_to_duration(input_path: str, output_path: str, target_duration: float = 8.5) -> bool:
     """
     Trim a clip to a target duration (removes excess silence/dead space at end).
@@ -202,6 +217,7 @@ def stitch_clips(clip_paths: list, output_path: str, transition_sec: float = 0.3
                      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=24,format=yuv420p",
                      "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                      "-pix_fmt", "yuv420p",
+                     "-video_track_timescale", "12800",
                      "-af", "aresample=async=1,apad",
                      "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k",
                      "-shortest",
@@ -217,6 +233,7 @@ def stitch_clips(clip_paths: list, output_path: str, transition_sec: float = 0.3
                          "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=24,format=yuv420p",
                          "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                          "-pix_fmt", "yuv420p",
+                         "-video_track_timescale", "12800",
                          "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k",
                          "-shortest",
                          norm_path],
@@ -235,6 +252,7 @@ def stitch_clips(clip_paths: list, output_path: str, transition_sec: float = 0.3
                      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=24,format=yuv420p",
                      "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                      "-pix_fmt", "yuv420p",
+                     "-video_track_timescale", "12800",
                      "-map", "0:v:0", "-map", "1:a:0",
                      "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k",
                      "-t", f"{vid_dur:.4f}",
@@ -477,6 +495,35 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
         logger.info(f"  ✅ Normalised {label}: {sz} KB → {dst}")
         return True
 
+    def _re_encode_with_fadeout(src: str, dst: str, label: str, fade_duration: float = 0.5) -> bool:
+        """Re-encode src with a fade-out at the end before CTA."""
+        r_probe = subprocess.run([ffmpeg_bin, "-i", src], capture_output=True, text=True)
+        import re as _re2
+        m = _re2.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", r_probe.stderr)
+        if not m:
+            return _re_encode(src, dst, label)  # fallback — no fadeout
+        total = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        fade_start = max(0.0, total - fade_duration)
+        r = subprocess.run(
+            [ffmpeg_bin, "-y", "-i", src,
+             "-vf", (f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,"
+                     f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,"
+                     f"fps={TARGET_FPS},format=yuv420p,"
+                     f"fade=t=out:st={fade_start:.4f}:d={fade_duration}"),
+             "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+             "-pix_fmt", "yuv420p",
+             "-video_track_timescale", "12800",
+             "-af", (f"afade=t=out:st={fade_start:.4f}:d={fade_duration},"
+                     f"aresample={TARGET_AR},apad"),
+             "-c:a", "aac", "-ar", str(TARGET_AR), "-ac", str(TARGET_ACH), "-b:a", "192k",
+             "-shortest", dst],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            logger.warning(f"Fadeout encode failed for {label}, falling back")
+            return _re_encode(src, dst, label)
+        return True
+
     def _make_pause(dst: str) -> bool:
         """Generate a black-frame + silence segment of *pause_sec* seconds."""
         if pause_sec <= 0:
@@ -504,7 +551,7 @@ def concat_with_normalized_cta(base_vid_path: str, cta_path: str, output_path: s
 
     # ── Step 1: normalise both inputs ─────────────────────────────────────────
     logger.info("  🔧 Normalising AI video for CTA concat…")
-    if not _re_encode(base_vid_path, norm_base, "AI video"):
+    if not _re_encode_with_fadeout(base_vid_path, norm_base, "AI video", fade_duration=0.5):
         return False
 
     logger.info("  🔧 Normalising CTA video…")

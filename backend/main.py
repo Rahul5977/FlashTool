@@ -335,7 +335,7 @@ def _run_generate_video_core(
     tag = "regen_final" if is_regen else "final"
     final_path = _unique_video_path(tag)
     if len(clip_paths) > 1:
-        ok = stitch_clips(clip_paths, final_path)
+        ok = stitch_clips(clip_paths, final_path, transition_sec=0.5)
         if not ok:
             final_path = clip_paths[0]
     else:
@@ -938,7 +938,7 @@ g) CAMERA MOVEMENT
 RULE 10 — FORMAT PROHIBITIONS PRESENT
 ════════════════════════════════════════════════════════════
 Every clip must contain:
-"No cinematic letterbox bars. No black bars. Full 9:16 vertical portrait frame edge to edge.
+"No cinematic letterbox bars. No black bars.(1:1 or 9:16 both fine)
 No burned-in subtitles. No text overlays. No lower thirds. No captions. No watermarks.
 No on-screen app UI. If showing phone, show dark screen only.
 Audio-visual sync: match lip movements precisely to spoken dialogue."

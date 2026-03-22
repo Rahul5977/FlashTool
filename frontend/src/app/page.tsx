@@ -188,6 +188,7 @@ export default function Home() {
     const arMap: Record<string, string> = {
       "9:16 (Reels / Shorts)": "9:16",
       "16:9 (YouTube / Landscape)": "16:9",
+      "1:1 (Square)": "1:1",
     };
 
     try {

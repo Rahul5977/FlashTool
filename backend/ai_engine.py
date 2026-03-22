@@ -161,6 +161,10 @@ def build_clip_prompts(
     ratio_map = {
         "9:16 (Reels / Shorts)": "9:16 vertical portrait",
         "16:9 (YouTube / Landscape)": "16:9 horizontal landscape",
+        "1:1 (Square)": "1:1 square",
+        "9:16": "9:16 vertical portrait",
+        "16:9": "16:9 horizontal landscape",
+        "1:1": "1:1 square",
     }
     ar = ratio_map.get(aspect_ratio, "9:16 vertical portrait")
     extra_section = f"\nPRODUCTION NOTES: {extra_prompt}" if extra_prompt.strip() else ""
@@ -246,10 +250,54 @@ CORRECT pattern:
 ✓ ONE static emotional state: "चेहरे पर शांत आत्मविश्वास है" — body still, hands in lap
 ✓ ONE pre-established physical state: character is already holding something from clip start
 
-HAND RULE: Hands must either be (a) out of frame entirely, or (b) already visible and still
-from the very first frame. Never instruct a hand to enter or leave frame mid-clip.
+HANDS RULE — CRITICAL FOR SEAMLESS STITCHING:
+Hands must be OUT OF FRAME or COMPLETELY STILL throughout.
 
-BODY RULE: "शरीर बिल्कुल स्थिर रहता है, हाथ नीचे ही रहेंगे" must appear in every ACTION block.
+WHY: Veo generates 8 seconds of movement. If hands are mid-gesture at
+the LAST FRAME of clip N, they will be in a DIFFERENT position at the
+FIRST FRAME of clip N+1. This creates an instant visual jump at every
+clip boundary — the most visible form of stutter.
+
+FORBIDDEN in ACTION block:
+  ✗ Any hand gesture: "वह हाथ से इशारा करता है" — will cause jump cut
+  ✗ Hand moves during emotion change: "वह हाथ उठाकर..." — forbidden
+  ✗ Picking up / putting down objects mid-clip
+
+REQUIRED in every ACTION block:
+  "शरीर बिल्कुल स्थिर रहता है।
+  हाथ गोद में रखे हुए हैं, फ्रेम से बाहर।
+  कोई हाथ का इशारा नहीं।"
+
+If a physical action IS needed (e.g., holding phone):
+  - The object must be established IN FRAME from the very first frame of the clip
+  - It cannot enter or leave frame mid-clip
+  - State it in CONTINUING FROM: "दाहिने हाथ में काली स्क्रीन वाला फोन,
+    फ्रेम के नीचे की ओर स्थिर"
+
+════════════════════════════════════════════════════════════
+SHOT TYPE LOCK — PREVENTS JARRING CUTS
+════════════════════════════════════════════════════════════
+Pick ONE shot type for the entire video and use it in EVERY clip.
+NEVER mix shot types between clips.
+
+RECOMMENDED for talking-head UGC ads:
+  मीडियम क्लोज-अप शॉट (MCU) — character visible from mid-chest up.
+  This shows face clearly, hides body/hand movement, looks like real UGC.
+
+FORBIDDEN shot combinations:
+  ✗ MCU in clip 1 → Medium shot in clip 2 (body suddenly more visible = jarring)
+  ✗ Close-up in clip 3 → MCU in clip 4 (face suddenly shrinks = jarring)
+  ✗ Any camera movement (zoom, pan, tilt) — always STATIC
+
+POSTURE LOCK:
+  Decide once: is the character SITTING or STANDING?
+  State this in every CONTINUING FROM and LAST FRAME block.
+  Veo will not maintain posture across clips unless explicitly told.
+  SEATED is better for UGC — sitting = intimate, confessional, real.
+
+CAMERA LINE TO USE IN EVERY CLIP:
+  "मीडियम क्लोज-अप शॉट, आई-लेवल पर (STATIC SHOT)।
+  Ultra-sharp focus, 8k resolution, highly detailed. कैमरा बिल्कुल स्थिर।"
 
 ════════════════════════════════════════════════════════════
 BACKGROUND FREEZE — MOST CRITICAL ANTI-HALLUCINATION RULE
@@ -471,38 +519,35 @@ def build_continuing_from(
     contents.append(types.Part.from_text(text=(
         f"These {len(frames)} images are the last frames of a video clip "
         f"(ordered earliest to latest, sampled from the final 2 seconds).\n\n"
-        f"The NEXT clip that will be generated is: '{next_scene_summary}'\n\n"
-        f"Write a precise CONTINUING FROM: description for the Veo prompt of the next clip.\n"
-        f"This description is the ONLY thing preventing visual drift — be exhaustive.\n\n"
-        f"MANDATORY sections to cover:\n\n"
-        f"1. CHARACTER FACE (most critical — describe every detail you can see):\n"
-        f"   - Exact skin tone (warm/cool/neutral, dark/medium/light — be specific)\n"
-        f"   - Face shape visible in this frame\n"
-        f"   - Eye color, shape, any makeup visible\n"
-        f"   - Lip color and fullness\n"
-        f"   - Hair: color, texture, how it falls in this exact frame\n"
-        f"   - Any distinctive marks visible\n\n"
-        f"2. CHARACTER STATE:\n"
-        f"   - Exact body position (standing/sitting, which direction facing)\n"
-        f"   - Expression: precise micro-expression\n"
-        f"   - Both hands: exact position and what they are holding/touching\n"
-        f"   - What the character just finished saying or doing\n\n"
-        f"3. BACKGROUND INVENTORY (critical — Veo hallucinates new objects if this is vague):\n"
-        f"   List each object individually:\n"
-        f"   'Left shelf: [count] [color] [shape] items. Center shelf: ... Right shelf: ...'\n"
-        f"   Wall color and texture. Counter/floor material and color.\n\n"
-        f"4. CAMERA:\n"
-        f"   - Exact angle (eye-level / slightly low / slightly high)\n"
-        f"   - Exact distance (extreme close-up / close-up / medium / medium-wide)\n"
-        f"   - Movement state (always write 'camera absolutely still' unless clearly moving)\n\n"
-        f"5. LIGHTING LOCK:\n"
-        f"   - Direction, color temperature, quality, shadow direction\n\n"
-        f"6. FACE LOCK STATEMENT to inject into next prompt:\n"
-        f"   Write: '⚠️ FACE LOCK: The character's face is [describe exact features seen in these frames]. "
-        f"This face must remain 100% identical — same bone structure, same skin tone, same eyes, same lips.'\n\n"
-        f"Format: start directly with 'CONTINUING FROM:' — no preamble.\n"
-        f"Maximum 250 words. Be exhaustively specific. Factual, not poetic.\n"
-        f"Every vague word is a drift risk — replace with exact specifics."
+        f"The NEXT clip is: '{next_scene_summary}'\n\n"
+        f"Write a CONTINUING FROM: block for the next Veo prompt. "
+        f"Be exhaustively specific — every vague word is a drift risk.\n\n"
+        f"MANDATORY — cover ALL of these exactly:\n\n"
+        f"1. SHOT TYPE & FRAMING (critical — prevents shot-size drift between clips):\n"
+        f"   State the exact shot: 'medium close-up (character from mid-chest up)'\n"
+        f"   OR 'medium shot (character from waist up)' OR 'close-up (face and shoulders)'\n"
+        f"   The next clip MUST use this EXACT same framing.\n\n"
+        f"2. CHARACTER POSTURE:\n"
+        f"   Seated or standing? If seated: what surface, which direction facing.\n"
+        f"   If standing: feet position, lean direction.\n"
+        f"   This is the #1 cause of jarring cuts — posture MUST match clip-to-clip.\n\n"
+        f"3. HAND & ARM POSITION:\n"
+        f"   Exact resting position of BOTH hands. Are they in frame or out of frame?\n"
+        f"   If in frame: where exactly (lap, desk, clasped, etc.)\n\n"
+        f"4. EXPRESSION:\n"
+        f"   Precise micro-expression. Not 'looks sad' but:\n"
+        f"   'lips slightly parted, slight furrow in brow, eyes looking directly at camera'\n\n"
+        f"5. BACKGROUND INVENTORY:\n"
+        f"   List EVERY visible object by position (left/center/right).\n"
+        f"   Wall color. Any windows or light sources visible.\n"
+        f"   Floor material if visible.\n\n"
+        f"6. LIGHTING STATE:\n"
+        f"   Which side. Color temperature (warm/cool/neutral). Soft or hard.\n"
+        f"   Copy this verbatim into next clip's LIGHTING block.\n\n"
+        f"7. CAMERA:\n"
+        f"   Eye-level / slightly above / slightly below.\n"
+        f"   State: 'camera absolutely still, no movement'\n\n"
+        f"Format: start with 'CONTINUING FROM:' — no preamble. Max 220 words."
     )))
 
     response = gemini_client.models.generate_content(
@@ -542,7 +587,7 @@ def generate_clip_with_frame_context(
     clip_num: int, total: int,
     prev_video_path: str,
     next_scene_summary: str,
-    n_frames: int = 10,
+    n_frames: int = 15,
 ):
     """
     Generate clips 2+:
@@ -556,6 +601,12 @@ def generate_clip_with_frame_context(
 
     logger.info(f"  🎞️ Extracting last {n_frames} frames from clip {clip_num - 1} for analysis...")
     frames = video_engine.extract_last_n_frames(prev_video_path, n=n_frames)
+    try:
+        first_frame = video_engine.extract_frame_at(prev_video_path, t=0.5)
+        # Prepend first frame so Gemini sees full start→end arc
+        frames = [first_frame] + frames
+    except Exception:
+        pass  # non-fatal
     logger.info(f"  ✅ {len(frames)} frames extracted for Gemini analysis")
 
     logger.info(f"  🧠 Gemini analysing frames → generating CONTINUING FROM...")

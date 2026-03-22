@@ -1656,7 +1656,7 @@ if (st.session_state.get("_sl_confirmed")
     final_path = os.path.join(TMP, "superliving_final_ad.mp4")
     if num_clips > 1:
         with st.status("✂️  Stitching clips...", expanded=True) as status:
-            ok = stitch_clips(clip_paths, final_path)
+            ok = stitch_clips(clip_paths, final_path, transition_sec=0.5)
             status.update(
                 label="✅ Stitched!" if ok else "⚠️ Stitch failed — showing first clip",
                 state="complete" if ok else "error",
@@ -1858,7 +1858,7 @@ if st.session_state.get("_sl_regen_trigger") and not st.session_state.get("_sl_r
         final_path = os.path.join(TMP, "superliving_final_ad.mp4")
         if num_clips > 1:
             with st.status("✂️ Re-stitching all clips...", expanded=True) as status:
-                ok = stitch_clips(clip_paths, final_path)
+                ok = stitch_clips(clip_paths, final_path, transition_sec=0.5)
                 status.update(
                     label="✅ Re-stitched!" if ok else "⚠️ Stitch failed",
                     state="complete" if ok else "error",
