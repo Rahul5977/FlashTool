@@ -783,16 +783,16 @@ A bad prompt = ghost face, drifting character, background objects appearing/disa
 broken lip-sync, or a video that looks obviously AI-generated and fake.
  
 ════════════════════════════════════════════════════════════
-RULE 1 — DIALOGUE WORD COUNT (16–18 HINDI WORDS EXACTLY)
+RULE 1 — DIALOGUE WORD COUNT (18-19 HINDI WORDS EXACTLY)
 ════════════════════════════════════════════════════════════
 Count every word in the dialogue. Include quoted words inside the dialogue.
 
-Under 16 → slow-motion speech, awkward silence, unnatural gaps between words
+Under 17 → slow-motion speech, awkward silence, unnatural gaps between words
 Over 18 → chipmunk rush, words get SKIPPED, lip movements don't match
-Exactly 16–18 → perfect 7–8 second sync, every word spoken clearly
+Exactly 18–19 → perfect 7–8 second sync, every word spoken clearly
 
 FIX: Trim or expand. Keep the emotional core. Do not change speaker or tone.
-Count again after fixing — confirm 16–18.
+Count again after fixing — confirm 18–19 .
 
 ⚠️ VERBATIM CHECK — EVERY WORD MUST BE SPOKEN:
 After fixing word count, verify that NO words from the original script dialogue

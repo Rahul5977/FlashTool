@@ -64,10 +64,15 @@ export default function Home() {
   const [clipPaths, setClipPaths] = useState<string[]>([]);
 
   // ── Job system ────────────────────────────────────────────────────────
+  // Store the clips snapshot used for each job so we can restore them on open
+  const jobClipsRef = useRef<Record<string, ClipPrompt[]>>({});
+
   const handleJobDone = useCallback((job: Job) => {
     if (job.result) {
       setVideoUrl(`${API_BASE}${job.result.video_url}`);
       setClipPaths(job.result.clip_paths);
+      const savedClips = jobClipsRef.current[job.id];
+      if (savedClips) setClips(savedClips);
       setPhase("result");
     }
   }, []);
@@ -82,6 +87,8 @@ export default function Home() {
       if (job.result) {
         setVideoUrl(`${API_BASE}${job.result.video_url}`);
         setClipPaths(job.result.clip_paths);
+        const savedClips = jobClipsRef.current[job.id];
+        if (savedClips) setClips(savedClips);
         setActive(job.id);
         setPhase("result");
       }
@@ -207,6 +214,8 @@ export default function Home() {
       }
 
       const data = await resp.json();
+      // Snapshot the clips used for this job so they can be restored on open
+      jobClipsRef.current[data.job_id] = [...clips];
       addJob({
         id:        data.job_id,
         label:     `Job #${jobs.length + 1} — ${numClips} clips`,
