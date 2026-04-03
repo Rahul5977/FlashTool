@@ -874,7 +874,7 @@ async def verify_prompts(request: VerifyPromptsRequest):
             elif "clips" in parsed and isinstance(parsed["clips"], list) and parsed["clips"]:
                 parsed = parsed["clips"][0]
 
-            # Extract only the 4 fields ClipVerification expects — ignore all extras.
+            # Extract fields ClipVerification expects — ignore all extras.
             # Coerce types so Pydantic never sees an unexpected value.
             issues_raw = parsed.get("issues", [])
             if isinstance(issues_raw, str):
@@ -882,10 +882,22 @@ async def verify_prompts(request: VerifyPromptsRequest):
             elif not isinstance(issues_raw, list):
                 issues_raw = []
 
+            # clip_score: use Gemini's weighted score if provided and valid
+            raw_score = parsed.get("clip_score")
+            try:
+                clip_score = max(0, min(100, int(raw_score))) if raw_score is not None else None
+            except (TypeError, ValueError):
+                clip_score = None
+
+            # Fall back to issue-count estimate if Gemini didn't return a score
+            if clip_score is None:
+                clip_score = max(0, 100 - len(issues_raw) * 10)
+
             c = {
                 "clip": int(parsed.get("clip") or clip.clip),
                 "status": str(parsed.get("status") or "approved"),
                 "issues": [str(i) for i in issues_raw],
+                "clip_score": clip_score,
                 "improved_prompt": hyphenate_dialogue_acronyms(
                     str(parsed.get("improved_prompt") or "") or clip.prompt
                 ),
@@ -895,14 +907,19 @@ async def verify_prompts(request: VerifyPromptsRequest):
                 issues_summary.append(f"Clip {clip.clip}: {'; '.join(c['issues'][:2])}")
 
         improved_count = sum(1 for c in verified_clips if c.status == "improved")
+        # Weighted overall_score: average of per-clip scores from Gemini's weighted evaluation
+        if verified_clips:
+            overall_score = max(0, round(sum(c.clip_score for c in verified_clips) / len(verified_clips)))
+        else:
+            overall_score = 100
         summary = (
-            f"{improved_count}/{len(verified_clips)} clips improved. "
+            f"{improved_count}/{len(verified_clips)} clips improved. Score: {overall_score}/100. "
             + (" | ".join(issues_summary[:3]) if issues_summary else "All clips passed.")
         )
 
         return VerifyPromptsResponse(
             clips=verified_clips,
-            overall_score=max(0, 100 - improved_count * 10),
+            overall_score=overall_score,
             summary=summary,
         )
 

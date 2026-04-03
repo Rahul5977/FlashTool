@@ -58,6 +58,21 @@ IMPROVEMENT CLAIMS:
 - "parlour glow" → "parlour ka asar" (temporary effect, not beauty claim)
 - "permanent glow" → "apni daily routine se confidence"
 
+REPLACEMENT PHILOSOPHY — EMOTIONAL EQUIVALENTS:
+Do NOT replace with generic words. Replace with the EMOTIONAL EQUIVALENT
+that preserves the viewer's self-recognition.
+
+EXAMPLES:
+- थकान → "3 बजे वाली वो थकान" (specific time) NOT "व्यस्त दिन" (generic)
+- दर्द → "वो बेचैनी" (emotional equivalent) NOT "तनाव" (different concept)
+- दवाई → "वो गोली" (keep vague reference) NOT remove entirely
+- skin care routine → "सुबह का वो रोज़ का काम" NOT "आदत" (too flat)
+- बीमारी → "वो सब" (pronoun + gesture) NOT "परेशानी" (changes meaning)
+
+THE TEST: After replacement, would a Tier 2–3 viewer still say
+"haan yaar yahi toh hota hai mujhe"? If YES → replacement is good.
+If NO → find a better emotional equivalent.
+
 ABSOLUTE RULES:
 1. NEVER change: outfit descriptions, CONTINUING FROM blocks, LAST FRAME blocks, FACE LOCK blocks,
    camera/lighting/location descriptions, no-letterbox/no-subtitle lines, the ⚠️ face lock statement
@@ -531,6 +546,73 @@ Replace the abstract feeling with a named person's observation or a
 behaviour that directly echoes clip 1. Keep all other sections identical.
 
 ════════════════════════════════════════════════════════════
+RULE 20 — ACTION BLOCK: MICRO-BEHAVIOUR NOT PERFORMANCE
+════════════════════════════════════════════════════════════
+FLAG if ACTION block uses performance language:
+  ✗ "आत्मविश्वास से बोलता है" (performs confidence)
+  ✗ "जोश के साथ कहता है" (performs enthusiasm)
+  ✗ "दृढ़ता से देखता है" (performs determination)
+
+PASS if ACTION block uses micro-behaviour language:
+  ✓ "बोलते हुए एक पल के लिए नज़रें झुकती हैं, फिर कैमरे की ओर आती हैं"
+  ✓ "हल्की सी साँस लेता है जैसे कुछ कहने से पहले"
+  ✓ "होंठों के कोनों पर एक छोटी, थकी हुई मुस्कान आती है"
+  ✓ "भौंहें एक पल को ऊपर उठती हैं जैसे अभी भी यकीन न हो"
+
+FIX: Replace performance adjectives with one specific micro-movement.
+Real people don't "look confidently." They look, then glance away,
+then look back. They exhale before saying something difficult.
+
+════════════════════════════════════════════════════════════
+RULE 21 — ARC CLOSURE: LAST CLIP MUST ECHO CLIP 1
+════════════════════════════════════════════════════════════
+Read clip 1 dialogue. Read the last clip dialogue.
+
+FLAG if last clip dialogue has NO connection to clip 1:
+  - No shared word, object, person, or situation
+  - Could be the ending of a completely different ad
+
+PASS if last clip dialogue contains:
+  - A word or phrase from clip 1, transformed
+  - The same object/situation but in a new state
+  - A direct answer to clip 1's implicit question
+
+EXAMPLES OF GOOD ARC CLOSURE:
+  Clip 1: "Video call pe boss bol raha tha..."
+  Last:   "Aaj khud camera on karta hoon, boss se pehle" ✓ (boss + camera echo)
+
+  Clip 1: "Raat 11 baje roti bana rahi thi..."
+  Last:   "Raat 11 baje chai bana ke baith ke peeti hoon" ✓ (raat 11 + bana echo)
+
+  Clip 1: "Calendar dekh ke count karti thi..."
+  Last:   "Calendar dekhti hoon. Darr ke saath nahi." ✓ (calendar echo)
+
+FIX: If arc closure is missing, add ONE word or phrase to the last clip
+dialogue that directly echoes something from clip 1. Keep all else same.
+
+════════════════════════════════════════════════════════════
+SCORING WEIGHTS — NOT ALL RULES ARE EQUAL
+════════════════════════════════════════════════════════════
+When calculating clip_score (0–100), start at 100 and deduct:
+
+CRITICAL (each violation = -20 points):
+  - Rule 18: Clip 1 hook is general emotion, not specific scene
+  - Rule 19: Last clip payoff uses abstract feeling language
+  - Rule 21: No arc closure between clip 1 and last clip
+
+HIGH (each violation = -10 points):
+  - Rule 1: Dialogue word count out of 16–18 range
+  - Rule 13: Em-dash in dialogue
+  - Rule 8: Face lock statement missing
+
+MEDIUM (each violation = -5 points):
+  - All other rule violations (lighting, camera, background freeze,
+    voiceover, micro-behaviour, phone screen, format prohibitions)
+
+A clip_score above 80 = ready to generate.
+A clip_score below 60 = critical issues — flag for user review.
+
+════════════════════════════════════════════════════════════
 OUTPUT FORMAT — valid JSON only, no markdown, no explanation
 ════════════════════════════════════════════════════════════
 Return a SINGLE JSON object (no array wrapper, no "clips" key):
@@ -541,6 +623,7 @@ Return a SINGLE JSON object (no array wrapper, no "clips" key):
     "Specific issue description — what was wrong and where",
     "Another issue"
   ],
+  "clip_score": <integer 0-100, computed using scoring weights above>,
   "improved_prompt": "Full corrected Hindi prompt. Identical to input if approved."
 }
 
@@ -593,6 +676,15 @@ def build_character_sheet_prompt(script: str) -> str:
         f"accessories, any distinctive marks.\n\n"
         f"CRITICAL RULE: Describe the neutral, static physical baseline ONLY. "
         f"DO NOT include time-based changes or temporary emotions.\n\n"
+        f"CRITICAL — TIER 2–3 INDIA AUTHENTICITY:\n"
+        f"This character must look like a real person from a small Indian city "
+        f"(Raipur, Patna, Kanpur, Nagpur, Jabalpur — not Mumbai or Delhi).\n"
+        f"- Skin tone: warm brown to medium brown, NOT fair/light\n"
+        f"- Build: average, NOT gym-fit or model-thin\n"
+        f"- Clothing: worn, not brand new. Slightly faded colours. Real fabrics.\n"
+        f"- Hair: naturally styled at home, not salon-done\n"
+        f"- NO model-like features. This person shops at local markets, not Zara.\n"
+        f"- Their face should carry the tiredness of a real life — not the freshness of a photoshoot.\n\n"
         f"FORMAT:\nCHARACTER: [Name/Role]\n"
         f"OUTFIT: [one sentence, exact garment]\n"
         f"APPEARANCE: [all other details, one dense paragraph]\n\n"
@@ -905,6 +997,26 @@ STEP 3: End EVERY clip's LOCATION block with this freeze line (verbatim):
   कोई वस्तु गायब नहीं होगी, रंग नहीं बदलेगा।"
 
 VIOLATION: If any clip's LOCATION differs from clip 1 — that is a fatal error.
+
+════════════════════════════════════════════════════════════
+LOCATION AUTHENTICITY — TIER 2–3 INDIA ONLY
+════════════════════════════════════════════════════════════
+The background must look like a real home from a small Indian city. NOT a modern flat.
+
+AUTHENTIC DETAILS TO USE:
+- Walls: slightly worn cream, pale yellow, or light grey — NOT pristine white
+- Furniture: older wooden almirah, iron bed frame, plastic chairs — NOT IKEA-style
+- Flooring: mosaic tiles, plain cement, or worn marble — NOT hardwood
+- Lighting: single yellow tube light or one table lamp — NOT warm LED strips
+- Objects: steel utensils, old calendar on wall, plastic water bottle,
+  basic phone charging on a wire — NOT Amazon Echo or terracotta-pot houseplants
+- Window: simple iron grille visible — NOT floor-to-ceiling glass
+
+BANNED SETTINGS:
+- Modern minimalist rooms
+- Any room that looks like it costs > ₹15,000/month rent
+- Studio-looking backgrounds
+- Greenery-heavy "aesthetic" setups
 
 ════════════════════════════════════════════════════════════
 DIALOGUE — THE LIP-SYNC GOLDILOCKS ZONE
@@ -1315,6 +1427,26 @@ STEP 3: End EVERY clip's LOCATION block with this freeze line (verbatim):
 कोई वस्तु गायब नहीं होगी, रंग नहीं बदलेगा।"
 
 VIOLATION: If any clip's LOCATION differs from clip 1 — that is a fatal error.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LOCATION AUTHENTICITY — TIER 2–3 INDIA ONLY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The background must look like a real home from a small Indian city. NOT a modern flat.
+
+AUTHENTIC DETAILS TO USE:
+- Walls: slightly worn cream, pale yellow, or light grey — NOT pristine white
+- Furniture: older wooden almirah, iron bed frame, plastic chairs — NOT IKEA-style
+- Flooring: mosaic tiles, plain cement, or worn marble — NOT hardwood
+- Lighting: single yellow tube light or one table lamp — NOT warm LED strips
+- Objects: steel utensils, old calendar on wall, plastic water bottle,
+  basic phone charging on a wire — NOT Amazon Echo or terracotta-pot houseplants
+- Window: simple iron grille visible — NOT floor-to-ceiling glass
+
+BANNED SETTINGS:
+- Modern minimalist rooms
+- Any room that looks like it costs > ₹15,000/month rent
+- Studio-looking backgrounds
+- Greenery-heavy "aesthetic" setups
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PHONE SCREEN TRAP

@@ -160,6 +160,7 @@ class ClipVerification(BaseModel):
     clip: int
     status: str             # "approved" | "improved"
     issues: list[str]       # list of what was wrong
+    clip_score: int = 100   # 0-100 weighted score (see auditor scoring weights)
     improved_prompt: str    # same as original if approved, fixed if improved
  
  
