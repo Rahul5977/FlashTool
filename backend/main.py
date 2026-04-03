@@ -36,6 +36,7 @@ from .prompts import GEMINI_PROMPT_AUDITOR
 from .ai_engine import (
     RaiCelebrityError,
     RaiContentError,
+    analyse_script_for_production,
     analyze_character_photo,
     build_character_sheet,
     build_clip_prompts,
@@ -52,6 +53,8 @@ from .ai_engine import (
 from .api_models import (
     AgenticPipelineRequest,
     AgenticPipelineResponse,
+    AnalyseScriptRequest,
+    AnalyseScriptResponse,
     AnalyzeCharactersResponse,
     CharacterAnalysis,
     CharacterProfile,
@@ -661,6 +664,28 @@ async def analyze_characters(
     return AnalyzeCharactersResponse(analyses=analyses)
 
 
+# ── Analyse script (Step 0) ───────────────────────────────────────────────────
+
+@app.post("/api/analyse-script", response_model=AnalyseScriptResponse)
+async def analyse_script(request: AnalyseScriptRequest):
+    """
+    Step 0 — Analyse the raw script and return a production brief + improved script.
+    The improved script is shown to the user for review before clip prompts are built.
+    """
+    gemini_client, _ = _get_clients()
+    try:
+        production_brief, improved_script = analyse_script_for_production(
+            gemini_client, request.script, request.num_clips
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Script analysis failed: {e}")
+
+    return AnalyseScriptResponse(
+        production_brief=production_brief,
+        improved_script=improved_script,
+    )
+
+
 # ── Generate prompts ──────────────────────────────────────────────────────────
 
 @app.post("/api/generate-prompts", response_model=GeneratePromptsResponse)
@@ -695,6 +720,7 @@ async def generate_prompts(request: GeneratePromptsRequest):
             num_clips=request.num_clips,
             language_note=request.language_note,
             has_photos=request.has_photos,
+            production_brief=request.production_brief,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prompt generation failed: {e}")
@@ -702,6 +728,7 @@ async def generate_prompts(request: GeneratePromptsRequest):
     return GeneratePromptsResponse(
         clips=[ClipPrompt(**c) for c in clips],
         character_sheet=character_sheet,
+        production_brief=request.production_brief,
     )
 
 

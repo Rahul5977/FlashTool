@@ -54,6 +54,18 @@ class AnalyzeCharactersResponse(BaseModel):
     analyses: dict[str, CharacterAnalysis] = Field(default_factory=dict)
 
 
+# ── POST /api/analyse-script ──────────────────────────────────────────────────
+
+class AnalyseScriptRequest(BaseModel):
+    script: str = Field(..., min_length=1)
+    num_clips: int = Field(default=6, ge=1, le=8)
+
+
+class AnalyseScriptResponse(BaseModel):
+    production_brief: str = ""
+    improved_script: str = ""
+
+
 # ── POST /api/generate-prompts ───────────────────────────────────────────────
 
 class GeneratePromptsRequest(BaseModel):
@@ -65,11 +77,13 @@ class GeneratePromptsRequest(BaseModel):
     num_clips: int = Field(default=6, ge=1, le=8)
     language_note: bool = True
     has_photos: bool = False
+    production_brief: str = ""  # pre-computed by /api/analyse-script
 
 
 class GeneratePromptsResponse(BaseModel):
     clips: list[ClipPrompt]
     character_sheet: str = ""
+    production_brief: str = ""
 
 
 # ── POST /api/generate-video (async job) ─────────────────────────────────────

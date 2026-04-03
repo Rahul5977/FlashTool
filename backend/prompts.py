@@ -7,7 +7,6 @@ All AI prompt strings live here. Import and use them in other modules.
   Dynamic prompts → functions that accept parameters and return a formatted string
 """
 
-
 # ═════════════════════════════════════════════════════════════════════════════
 # STATIC PROMPTS  (no runtime parameters)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -115,6 +114,7 @@ FLAG and FIX any of these patterns in ACTION block:
 ✗ "eyes light up as he realizes" → transition language → remove
 ✗ Large head turns (>15 degrees), standing up/sitting down mid-clip
 ✗ Continuous repetitive motion (nodding throughout, swaying)
+✗ Profile or sharp 3/4 turn — character must face camera or turn ≤15° to either side
 
 ALSO FLAG — FROZEN STATUE (too still = looks AI-generated):
 ✗ "शरीर बिल्कुल स्थिर रहता है" alone with zero movement described
@@ -182,14 +182,24 @@ Veo will hallucinate a face/UI if not explicitly blocked.
 ════════════════════════════════════════════════════════════
 RULE 6 — BACKGROUND LOCK (FATAL IF VIOLATED)
 ════════════════════════════════════════════════════════════
-Every clip's LOCATION block must be VERBATIM identical to clip 1.
-The freeze line must appear at the end:
+Every clip's LOCATION block must be VERBATIM identical to the LOCKED BACKGROUND
+established in the FIRST clip for THAT CHARACTER.
+
+SINGLE-CHARACTER ADS: All clips copy clip 1's LOCATION verbatim.
+
+MULTI-CHARACTER ADS (e.g., main character + coach):
+- All clips showing Character A → verbatim copy of Character A's first clip LOCATION.
+- All clips showing Character B → verbatim copy of Character B's first clip LOCATION.
+- NEVER copy Character A's background into Character B's clips (or vice versa).
+
+The freeze line must appear at the end of EVERY clip's LOCATION:
 "पृष्ठभूमि पूरी तरह स्थिर और अपरिवर्तित रहती है — कोई नई वस्तु नहीं आएगी,
 कोई वस्तु गायब नहीं होगी, रंग नहीं बदलेगा।"
 
-FLAG: If any clip's LOCATION differs from clip 1 (even slightly paraphrased).
-FLAG: If CONTINUING FROM mentions a DIFFERENT location than the LOCKED BACKGROUND.
-FIX: Replace with verbatim clip 1 LOCATION.
+FLAG: If a clip's LOCATION differs from the correct locked background for that character.
+FLAG: If CONTINUING FROM mentions a different location than the LOCKED BACKGROUND.
+FLAG: If Character B's background text appears in a clip that shows Character A.
+FIX: Replace with verbatim LOCATION for the character shown in that clip.
 
 ════════════════════════════════════════════════════════════
 RULE 7 — CONTINUING FROM, LAST FRAME, AND REST POSITION
@@ -217,6 +227,30 @@ FLAG: LAST FRAME describes character mid-movement (e.g., "head tilted to right")
 FLAG: CONTINUING FROM says "previous character not here" without explaining the new scene
 FIX for new scene: "यह एक नया, स्वतंत्र दृश्य है। पिछले क्लिप के चरित्र और
 पृष्ठभूमि यहाँ नहीं हैं।" + full new scene description
+
+⚠️ RULE 7a — I2V FACE CONTAMINATION (RETURN-TO-CHARACTER BUG) — CRITICAL
+════════════════════════════════════════════════════════════
+This is the most commonly missed error in multi-character ads.
+
+PATTERN TO DETECT: Scan every clip in sequence. If clip N shows Character B
+and clip N+1 shows Character A (a different person), clip N+1 MUST open its
+CONTINUING FROM with the new-scene declaration — even if Character A appeared
+earlier in the ad.
+
+WHY: Veo uses clip N's last frame as the I2V starting image for clip N+1.
+If clip N = Coach Rashmi, clip N+1 starts rendering FROM Rashmi's face.
+Without the new-scene override, Rashmi's features morph into the Guy's face
+for the first 1–2 seconds — making the ad look broken and AI-generated.
+
+FLAG (automatic — check every adjacent clip pair):
+  IF the character in clip N ≠ the character in clip N+1
+  AND clip N+1's CONTINUING FROM does NOT contain "यह एक नया, स्वतंत्र दृश्य है"
+  → FLAG as I2V CONTAMINATION RISK
+
+FIX: Replace the CONTINUING FROM opening of clip N+1 with:
+  "यह एक नया, स्वतंत्र दृश्य है। पिछले क्लिप का चरित्र और पृष्ठभूमि यहाँ
+  नहीं हैं। [Character A] अपने [location] में [starting expression/posture]।"
+  Then fill in the rest of the CONTINUING FROM fields for Character A's scene.
 
 ════════════════════════════════════════════════════════════
 RULE 8 — FACE LOCK INTEGRITY
@@ -390,25 +424,72 @@ Veo's I2V chain passes the last frame of each clip as the first frame of the nex
 If any clip renders slightly darker, the next clip starts from that darker frame —
 causing progressive brightness decay by clips 4–6.
 
-MANDATORY: Every clip's LIGHTING block MUST contain this exact line:
+FOR CLIPS 1 THROUGH N-2 (all clips except the last two):
+MANDATORY: LIGHTING block MUST contain this exact line:
 "Exposure: same bright, well-lit level as clip 1. Face fully illuminated, no dimming,
 no shadow creep. Overall brightness IDENTICAL to clip 1. Camera exposure LOCKED."
 
-FLAG: Any clip whose LIGHTING block is missing the exposure anchor line above.
+FLAG: Any of these clips missing the exposure anchor line above.
 FIX: Add the line to the end of the LIGHTING block (before the ⚠️ eye socket line).
 
-════════════════════════════════════════════════════════════
-RULE 16 — NO SECOND CHARACTER IN FRAME
-════════════════════════════════════════════════════════════
-Only ONE character should be visible on screen at any time.
-A second character's FACE must NEVER appear in the frame.
-Off-screen sounds (laughter, voice) are allowed ONLY in the AUDIO block.
+FOR THE LAST 2 CLIPS (clips N-1 and N):
+The standard "IDENTICAL to clip 1" anchor is NOT sufficient — by this point the I2V
+chain has already accumulated darkness. These clips MUST use the BRIGHTNESS BOOST line:
+"⚡ BRIGHTNESS OVERRIDE (I2V drift compensation): Render this clip 15–20% BRIGHTER
+than clip 1 to offset cumulative I2V brightness decay. Face must be OVER-LIT —
+deliberately elevated exposure, never dim. Ignore the darker starting I2V frame;
+boost exposure aggressively. Overall brightness visibly HIGHER than clip 1.
+Camera exposure BOOSTED."
 
-FLAG: Any mention of a second person's face, expression, or body in the frame.
-FIX: Remove them entirely. Their presence can only exist as audio OR as the
-on-screen character quoting/recounting what they said.
-The best dialogue sounds like someone telling their friend exactly what happened.
-VERBATIM real user phrases are better than polished scripted lines.
+FLAG: Any of the last 2 clips using the standard "IDENTICAL to clip 1" anchor instead
+of the BRIGHTNESS BOOST override — the standard line is too weak for late clips.
+FLAG: Any of the last 2 clips whose LIGHTING block is missing the BRIGHTNESS BOOST line.
+FIX: Replace the standard anchor with the BRIGHTNESS BOOST line in the last 2 clips.
+
+════════════════════════════════════════════════════════════
+RULE 16 — SINGLE CHARACTER THROUGHOUT (ABSOLUTE RULE)
+════════════════════════════════════════════════════════════
+SuperLiving ads have EXACTLY ONE character on screen across ALL clips.
+No coach, no friend, no second person — ever.
+
+A coach's advice is delivered via the MAIN CHARACTER quoting them:
+  ✓ लड़की: "(याद करते हुए) कोच रश्मि ने बोला, 'सब बंद करो।'"
+  ✗ Coach Rashmi appearing directly on screen → INSTANT FLAG
+
+INSTANT FLAG:
+- Any clip whose OUTFIT & APPEARANCE describes a different person from clip 1.
+- Any clip where CONTINUING FROM describes a different character's face/location.
+- Any dialogue line attributed to a coach/second character as an on-screen speaker.
+- Any LOCATION block that differs from clip 1's locked background (single character = single location).
+
+FIX:
+- Remove the second character's clip entirely.
+- Convert their dialogue to quoted speech in the preceding or following clip:
+  "[Main character]: '(याद करते हुए) [Coach name] ने बोला, \"[coach words]\"'"
+- Adjust word count of the merged dialogue to stay within 16–18 words.
+- The entire ad must read as one person telling their story to camera.
+
+════════════════════════════════════════════════════════════
+RULE 17 — CAMERA-FACING ORIENTATION (UGC REALISM)
+════════════════════════════════════════════════════════════
+SuperLiving ads are direct-to-camera UGC testimonials. The character must face
+the camera at all times — like someone recording themselves on a phone.
+
+ALLOWED:
+  ✓ Full frontal — character looking straight into the lens
+  ✓ Subtle 10–15° head tilt/turn — natural, still reads as camera-facing
+
+FORBIDDEN:
+  ✗ Profile shot (side-on face) — character looks like they're ignoring the viewer
+  ✗ Sharp 3/4 turn (45°+ away from camera) — breaks UGC direct-to-camera style
+  ✗ Looking off-screen for more than a glance (1 second max)
+
+FLAG: Any ACTION or LAST FRAME block that does not mention the character facing
+the camera (missing "सीधे कैमरे की ओर देखते हुए" or equivalent).
+FLAG: Any clip whose ACTION implies the character is turned away, looking sideways,
+or in profile orientation.
+FIX: Add "कैमरे की तरफ मुँह करके" to the ACTION block. Replace any profile/3/4
+turn description with subtle head tilt (≤15°) while still facing the lens.
 
 ════════════════════════════════════════════════════════════
 OUTPUT FORMAT — valid JSON only, no markdown, no explanation
@@ -689,9 +770,20 @@ FORBIDDEN MOVEMENTS (these break clip boundaries):
   ✗ Standing up / sitting down mid-clip
   ✗ "slowly smiles" / "gradually becomes confident" → transitions cause drift
   ✗ Continuous repetitive motion (nodding throughout, swaying)
+  ✗ Profile view or sharp 3/4 turn — character must face camera or turn no more than 15–20° to either side
+
+CAMERA-FACING RULE (CRITICAL FOR UGC REALISM):
+  The character must face the camera directly or at most 15–20° sideways.
+  Think: someone recording a selfie video — they look INTO the lens, not away from it.
+  ✗ Profile shot (side-on face) — character looks like they're ignoring the viewer
+  ✗ Sharp 3/4 turn — feels staged and breaks direct-to-camera UGC style
+  ✓ Full frontal (looking directly into lens) — preferred
+  ✓ Subtle 10–15° head turn for a natural feel — acceptable
+  Every clip's ACTION and LAST FRAME must describe the character as facing the camera.
+  "सीधे कैमरे की ओर देखते हुए" or "कैमरे की तरफ मुँह करके" must appear in every ACTION block.
 
 CORRECT ACTION block pattern:
-  ✓ "चेहरे पर शांत आत्मविश्वास है। बोलते हुए हल्का सा सिर झुकाव।
+  ✓ "चेहरे पर शांत आत्मविश्वास है। कैमरे की तरफ मुँह करके बोलते हुए हल्का सा सिर झुकाव।
      आखिरी 2 सेकंड में स्थिर REST POSITION में वापस।
      हाथ फ्रेम से बाहर।"
 
@@ -852,14 +944,29 @@ If any character holds or looks at a phone:
 - Veo WILL hallucinate a face/UI if not explicitly blocked.
 
 ════════════════════════════════════════════════════════════
-SCENE CHANGE RULE (multiple locations or characters)
+SINGLE CHARACTER RULE — NO EXCEPTIONS
 ════════════════════════════════════════════════════════════
-If a clip introduces a completely new character or new location:
-- CONTINUING FROM must explicitly state: "यह एक नया, स्वतंत्र दृश्य है। पिछले
-  क्लिप के चरित्र और पृष्ठभूमि यहाँ नहीं हैं।"
-- The new character MUST have their own FACE LOCK STATEMENT — never reference
-  a different character's face lock.
-- New character's full OUTFIT & APPEARANCE must be written from scratch.
+The ENTIRE ad features EXACTLY ONE character on screen from clip 1 to the last clip.
+No coach. No friend. No second person. No cut-away to another face. Ever.
+
+If the script originally had a coach (Rishika, Rashmi, Tara, Dev, Arjun, Pankaj, Seema)
+speaking directly, the improved script fed to you will have already converted those lines
+to the MAIN CHARACTER quoting the coach. Use that quoted form verbatim.
+
+CORRECT PATTERN — coach advice delivered via quoted speech:
+  ✓ लड़की: "(बातचीत के लहजे में, याद करते हुए) कोच रश्मि ने बोला,
+    'सब बंद करो, सनस्क्रीन, हल्दी-बेसन, पानी। बस।'"
+
+FORBIDDEN:
+  ✗ Any clip that introduces a second character's face on screen.
+  ✗ Any "new scene" with a different character or different background.
+  ✗ Any CONTINUING FROM that says "यह एक नया, स्वतंत्र दृश्य है" — this phrase
+    means a different character was about to appear, which is now illegal.
+
+Because there is only one character:
+- Every clip uses the SAME locked background — established in clip 1, never changes.
+- FACE LOCK always references "same as clip 1."
+- LOCATION is verbatim clip 1 in every single clip, no exceptions.
 
 ════════════════════════════════════════════════════════════
 REALISM RULES — WHAT MAKES IT LOOK REAL, NOT AI
@@ -896,6 +1003,18 @@ REALISM RULES — WHAT MAKES IT LOOK REAL, NOT AI
 8. CONTINUOUS DIALOGUE: If a conversation spans multiple clips, maintain the same emotional tone and energy level in the dialogue across clips. This prevents Veo from randomly changing the character's mood.
 
 ════════════════════════════════════════════════════════════
+PRODUCTION BRIEF INSTRUCTIONS (CRITICAL — READ BEFORE WRITING CLIP 1)
+════════════════════════════════════════════════════════════
+A production brief from the script analyst is provided in the user message.
+MANDATORY: Read the DIRECTOR NOTES and EMOTIONAL ARC fields before writing any clip.
+- Match the character's expression and body language to the arc label.
+- If the brief flags THIN Tier 2–3 texture, enrich the LOCATION block with culturally
+  specific background objects (Hindi calendar, steel shelf, old wall clock, etc.)
+- If the brief flags any SPEECH RHYTHM issues (dashes), use the corrected dialogue verbatim.
+- The PAYOFF TYPE tells you what clip 6/7's expression must deliver — a realisation
+  face looks different from a confidence face. Get it right.
+
+════════════════════════════════════════════════════════════
 MANDATORY SECTIONS IN EVERY CLIP PROMPT
 ════════════════════════════════════════════════════════════
 Use this exact section order:
@@ -904,7 +1023,8 @@ Use this exact section order:
 2. FACE LOCK STATEMENT: ⚠️ चेहरा पूरी तरह स्थिर और क्लिप 1 के समान रहेगा —
    चेहरे की बनावट, त्वचा का रंग, आँखें, होंठ, बाल — कोई परिवर्तन नहीं।
 3. OUTFIT & APPEARANCE: [verbatim locked outfit + full appearance — no paraphrase]
-4. LOCATION: [verbatim LOCKED BACKGROUND from clip 1 + freeze line]
+4. LOCATION: [verbatim LOCKED BACKGROUND for THIS CHARACTER + freeze line.
+   Multi-character ads: use THIS character's own locked background, NOT another character's.]
 5. ACTION: [ONE emotional state + 1–2 micro-movements + SETTLE instruction.
    "चेहरे पर [भाव]। बोलते हुए [1–2 सूक्ष्म हलचल]।
    ⚠️ आखिरी 1–2 सेकंड: REST POSITION में स्थिर — सीधे कैमरे की ओर, तटस्थ मुद्रा, हाथ फ्रेम से बाहर।"]
@@ -937,7 +1057,10 @@ Before writing each clip's JSON, verify:
 □ LAST FRAME: character in REST POSITION (still, neutral)? Background inventory complete?
 □ Voiceover: zero? All dialogue assigned to on-screen speaker only?
 □ Phone (if shown): black screen instruction present?
-□ FACE LOCK: present? References correct character?
+□ FACE LOCK: present? References "same as clip 1"?
+□ CAMERA-FACING: does ACTION mention character facing camera ("सीधे कैमरे की ओर" or equivalent)? No profile/sharp 3/4 turn?
+□ SINGLE CHARACTER CHECK: Is only ONE character ever on screen across ALL clips?
+  → If a coach or second person appears anywhere → REMOVE THEM. Main character quotes instead.
 
 If any check fails — fix before outputting.
 
@@ -1136,7 +1259,8 @@ Use this exact section order:
 2. FACE LOCK STATEMENT: ⚠️ चेहरा पूरी तरह स्थिर और क्लिप 1 के समान रहेगा —
    चेहरे की बनावट, त्वचा का रंग, आँखें, होंठ, बाल — कोई परिवर्तन नहीं।
 3. OUTFIT & APPEARANCE: [verbatim locked outfit + full appearance — no paraphrase]
-4. LOCATION: [verbatim LOCKED BACKGROUND from clip 1 + freeze line]
+4. LOCATION: [verbatim LOCKED BACKGROUND for THIS CHARACTER + freeze line.
+   Multi-character ads: use THIS character's own locked background, NOT another character's.]
 5. ACTION: [ONE emotional state + 1–2 micro-movements + SETTLE instruction.
    "चेहरे पर [भाव]। बोलते हुए [1–2 सूक्ष्म हलचल]।
    ⚠️ आखिरी 1–2 सेकंड: REST POSITION में स्थिर — सीधे कैमरे की ओर, तटस्थ मुद्रा, हाथ फ्रेम से बाहर।"]

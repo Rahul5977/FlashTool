@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import ConfigPanel from "@/components/ConfigPanel";
+import ScriptAnalyser from "@/components/ScriptAnalyser";
 import PromptEditor from "@/components/PromptEditor";
 import PromptVerifier from "@/components/Promptverifier";
 import VideoResult from "@/components/VideoResult";
@@ -25,8 +26,7 @@ export interface ClipPrompt {
   prompt: string;
 }
 
-// "verify" is the new phase between "review" and "result"
-type Phase = "input" | "review" | "verify" | "result";
+type Phase = "input" | "analyse" | "review" | "verify" | "result";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -55,7 +55,11 @@ export default function Home() {
   ]);
   const [, setPhotoAnalyses] = useState<Record<string, CharacterAnalysis>>({});
 
-  // ── Prompts state (Phase 2) ────────────────────────────────────────────
+  // ── Step 0 state (Phase: analyse) ─────────────────────────────────────
+  const [productionBrief, setProductionBrief] = useState("");
+  const [improvedScript, setImprovedScript] = useState("");
+
+  // ── Prompts state (Phase: review) ─────────────────────────────────────
   const [clips, setClips] = useState<ClipPrompt[]>([]);
   const [characterSheet, setCharacterSheet] = useState("");
 
@@ -96,20 +100,49 @@ export default function Home() {
     [setActive]
   );
 
-  /* ─── Phase 1 → Phase 2: Generate Prompts ──────────────────────────── */
+  /* ─── Phase 1 → Phase "analyse": Step 0 — analyse script ──────────── */
 
-  const handleGeneratePrompts = useCallback(async () => {
+  const handleAnalyseScript = useCallback(async () => {
     if (!script.trim()) {
-      setError("Please paste your ad script before generating.");
+      setError("Please paste your ad script before analysing.");
       return;
     }
     setError(null);
     setLoading(true);
 
     try {
+      const resp = await fetch(`${API_BASE}/api/analyse-script`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script, num_clips: numClips }),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Script analysis failed");
+      }
+
+      const data = await resp.json();
+      setProductionBrief(data.production_brief || "");
+      setImprovedScript(data.improved_script || script);
+      setPhase("analyse");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }, [script, numClips]);
+
+  /* ─── Phase "analyse" → Phase "review": Build clip prompts ─────────── */
+
+  const handleBuildPrompts = useCallback(async (approvedScript: string) => {
+    setError(null);
+    setLoading(true);
+
+    try {
       let localPhotoAnalyses: Record<string, CharacterAnalysis> = {};
 
-      // Step A: Analyse uploaded character photos
+      // Analyse uploaded character photos
       if (usePhotos) {
         const validChars = characters.filter((c) => c.name.trim() && c.file);
         if (validChars.length > 0) {
@@ -132,7 +165,6 @@ export default function Home() {
         }
       }
 
-      // Step B: Generate clip prompts
       const arMap: Record<string, string> = {
         "9:16 (Reels / Shorts)": "9:16",
         "16:9 (YouTube / Landscape)": "16:9",
@@ -141,7 +173,7 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          script,
+          script: approvedScript,
           extra_prompt: extraPrompt,
           character_sheet: characterSheet,
           photo_analyses: localPhotoAnalyses,
@@ -149,6 +181,7 @@ export default function Home() {
           num_clips: numClips,
           language_note: languageNote,
           has_photos: usePhotos && characters.some((c) => c.name.trim() && c.file),
+          production_brief: productionBrief,
         }),
       });
 
@@ -166,7 +199,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [script, extraPrompt, usePhotos, characters, aspectRatio, numClips, languageNote, characterSheet]);
+  }, [extraPrompt, usePhotos, characters, aspectRatio, numClips, languageNote, characterSheet, productionBrief]);
 
   /* ─── Phase 2 → Phase 2.5: Trigger Claude Verify ───────────────────── */
 
@@ -293,6 +326,8 @@ export default function Home() {
     setClipPaths([]);
     setError(null);
     setCharacterSheet("");
+    setProductionBrief("");
+    setImprovedScript("");
     setPhotoAnalyses({});
   };
 
@@ -403,14 +438,15 @@ export default function Home() {
 
         {/* ── Phase Progress Bar ───────────────────────────────────────── */}
         <div className="mb-6 flex items-center gap-2">
-          {(["input", "review", "verify", "result"] as Phase[]).map((p, i) => {
+          {(["input", "analyse", "review", "verify", "result"] as Phase[]).map((p, i) => {
             const labels: Record<Phase, string> = {
               input: "Script",
+              analyse: "Step 0",
               review: "Edit Prompts",
               verify: "Gemini Review",
               result: "Video",
             };
-            const phaseOrder: Phase[] = ["input", "review", "verify", "result"];
+            const phaseOrder: Phase[] = ["input", "analyse", "review", "verify", "result"];
             const currentIndex = phaseOrder.indexOf(phase);
             const thisIndex = phaseOrder.indexOf(p);
             const isActive = p === phase;
@@ -421,20 +457,20 @@ export default function Home() {
                   className="flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all"
                   style={{
                     background: isActive
-                      ? p === "verify" ? "rgba(99,102,241,0.2)" : "rgba(37,168,90,0.2)"
+                      ? p === "verify" ? "rgba(99,102,241,0.2)" : p === "analyse" ? "rgba(234,179,8,0.2)" : "rgba(37,168,90,0.2)"
                       : isDone ? "rgba(37,168,90,0.1)" : "rgba(255,255,255,0.05)",
                     color: isActive
-                      ? p === "verify" ? "#818cf8" : "#25a85a"
+                      ? p === "verify" ? "#818cf8" : p === "analyse" ? "#fcd34d" : "#25a85a"
                       : isDone ? "#25a85a" : "rgba(255,255,255,0.3)",
                     border: isActive
-                      ? p === "verify" ? "1px solid rgba(99,102,241,0.4)" : "1px solid rgba(37,168,90,0.4)"
+                      ? p === "verify" ? "1px solid rgba(99,102,241,0.4)" : p === "analyse" ? "1px solid rgba(234,179,8,0.4)" : "1px solid rgba(37,168,90,0.4)"
                       : "1px solid transparent",
                   }}
                 >
                   <span>{isDone ? "✓" : i + 1}</span>
                   <span>{labels[p]}</span>
                 </div>
-                {i < 3 && (
+                {i < 4 && (
                   <div
                     className="h-px flex-1"
                     style={{ background: isDone ? "rgba(37,168,90,0.3)" : "rgba(255,255,255,0.08)" }}
@@ -535,10 +571,10 @@ export default function Home() {
 
                   <div className="mt-8 flex justify-center">
                     <button
-                      onClick={handleGeneratePrompts}
+                      onClick={handleAnalyseScript}
                       disabled={loading}
                       className="rounded-xl px-12 py-4 text-lg font-bold text-white transition-all hover:opacity-90 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                      style={{ background: "linear-gradient(90deg, #1a7a3c, #25a85a)" }}
+                      style={{ background: "linear-gradient(90deg, #92610a, #d97706)" }}
                     >
                       {loading ? (
                         <span className="flex items-center gap-2">
@@ -546,11 +582,30 @@ export default function Home() {
                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                           </svg>
-                          Generating Prompts…
+                          Analysing script…
                         </span>
-                      ) : "🎬  Generate Prompts"}
+                      ) : "🔍  Analyse Script"}
                     </button>
                   </div>
+                </motion.div>
+              )}
+
+              {phase === "analyse" && (
+                <motion.div
+                  key="analyse"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 20 }}
+                  transition={{ duration: 0.3 }}
+                >
+                  <ScriptAnalyser
+                    productionBrief={productionBrief}
+                    improvedScript={improvedScript}
+                    setImprovedScript={setImprovedScript}
+                    loading={loading}
+                    onConfirm={handleBuildPrompts}
+                    onBack={() => setPhase("input")}
+                  />
                 </motion.div>
               )}
 
@@ -567,6 +622,7 @@ export default function Home() {
                     setClips={setClips}
                     characterSheet={characterSheet}
                     setCharacterSheet={setCharacterSheet}
+                    productionBrief={productionBrief}
                     onVerify={handleGoToVerify}
                     onConfirm={handleGenerateVideo}
                     onBack={() => setPhase("input")}

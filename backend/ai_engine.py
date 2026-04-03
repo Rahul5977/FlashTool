@@ -123,10 +123,155 @@ def get_clip_character_photo(clip_prompt: str, char_photos_raw: list) -> tuple:
     return best_bytes, best_mime, best_name
 
 # PROMPT GENERATION
-"""
-REPLACEMENT for the `build_clip_prompts` function in backend/ai_engine.py
-Replace the entire function — from `def build_clip_prompts(` to the final `return data["clips"]`
-"""
+
+
+def analyse_script_for_production(client, script: str, num_clips: int) -> tuple[str, str]:
+    """
+    Step 0 — Script Dialogue Analyst + Rewriter.
+    Runs BEFORE build_clip_prompts().
+    Returns (production_brief, improved_script).
+    The improved script is shown to the user for review before clip prompts are built.
+    The production brief is injected into the clip prompt generator.
+    """
+    system = """You are a script analyst and rewriter for SuperLiving — a health coaching app
+for Tier 2–3 India (Raipur, Patna, Kanpur, Nagpur). You do two things in one pass:
+(A) analyse the script across 8 dimensions and write a production brief, then
+(B) rewrite the script to fix every problem you found.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART A — ANALYSE ACROSS 8 DIMENSIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. HOOK TYPE
+   - Is clip 1's opening line a specific physical scene, a named duration, or a named object?
+   - Or does it just state an emotion (scared, sad, anxious)?
+   - Specific scene/duration/object = HIGH PERFORMING HOOK
+   - Named emotion = WEAK HOOK
+   - State which type this script has and what fix is needed.
+
+2. HINGLISH REGISTER
+   - Is the dialogue how people actually speak in Tier 2–3 cities?
+   - Flag any lines that sound like written/translated Hindi, motivational posters,
+     or formal grammar.
+   - Examples of BAD register: "मैं सुपरलिविंग का उपयोग करता हूँ", "विश्वास रखो"
+   - Examples of GOOD register: "yaar, seedha bol de", "pata nahi kya ho gaya mujhe"
+
+3. TIER 2–3 CULTURAL TEXTURE
+   - Does the script name specific social forces? (saas, bhabhi, jethani, padosi aunty,
+     office wali, chacha, bhaiya, etc.)
+   - Does it name a physical location? (galley, kitchen, bed, mirror, office bathroom, bus, auto)
+   - Rate: RICH / MODERATE / THIN. If THIN: name which clips need more texture.
+
+4. COACH LINE REGISTER
+   - Find every line spoken by or attributed to Rishika/Rashmi/Tara/Dev/Arjun/Pankaj/Seema.
+   - Does it sound like a friend from the same city, or a health website?
+   - FRIEND REGISTER: "yaar, tu theek hai", "chhod na, kal se shuru karte hain"
+   - WEBSITE REGISTER: "आपकी स्वास्थ्य यात्रा शुरू होती है"
+   - NOTE: All coach dialogue will be converted to quoted speech in Part B.
+
+5. EMOTIONAL ARC
+   - Label the journey: GUILT → RECOGNITION → HOPE | PAIN → SEEN → CONFIDENCE |
+     SHAME → NORMALISATION → RELIEF | EXHAUSTION → VALIDATION → ACTION
+
+6. PAYOFF TYPE
+   - What does the final clip deliver?
+     INTERNAL REALISATION | SOCIAL PROOF MOMENT | CONFIDENCE MIRROR MOMENT | BEHAVIOUR CHANGE
+
+7. EM-DASH / SPEECH RHYTHM AUDIT
+   - Scan every dialogue line for — (em-dash) or word-connecting - (hyphen).
+   - List every occurrence. If none: "CLEAN."
+
+8. DIALOGUE WORD COUNT PER CLIP
+   - Count spoken words per clip. Flag under 13 or over 20.
+   - Target: 15–19 words. Format: CLIP 1: 17 words ✓ | CLIP 2: 23 words ⚠️ (trim by 4)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART B — REWRITE THE SCRIPT (fix every issue found in Part A)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Apply ALL of these fixes in the improved script:
+
+FIX 1 — SINGLE CHARACTER ONLY (most important fix)
+SuperLiving ads have EXACTLY ONE character on screen throughout the entire ad.
+If the script has a coach (Rishika, Rashmi, Tara, Dev, Arjun, Pankaj, Seema)
+speaking directly, convert their lines to the MAIN CHARACTER quoting them.
+The coach never appears on screen — the main character tells the audience what
+the coach advised them.
+
+CONVERSION PATTERN:
+  BEFORE: कोच रश्मि: "सब बंद करो। सनस्क्रीन, हल्दी-बेसन, पानी। बस।"
+  AFTER:  [main character]: "(बातचीत के लहजे में, याद करते हुए) कोच रश्मि ने बोला,
+          'सब बंद करो, सनस्क्रीन, हल्दी-बेसन, पानी। बस।'"
+
+WHY: The audience connects with ONE person's story told intimately to camera.
+A second character appearing breaks intimacy and causes I2V face contamination.
+The quote format keeps the coach's voice authentic without them appearing.
+
+FIX 2 — WEAK HOOK
+If clip 1 just names an emotion, replace with a specific physical scene or duration.
+WEAK: "मुझे बहुत डर लगता था।"
+STRONG: "हर सुबह mirror देखना बंद कर दिया था — तीन महीने से।"
+
+FIX 3 — HINGLISH REGISTER
+Convert any formal/written Hindi to natural conversational Tier 2–3 speech.
+Remove motivational-poster language. Make it sound like one friend talking to another.
+
+FIX 4 — WORD COUNT
+Adjust any clip dialogue that is under 13 or over 20 words to land at 15–19 words.
+Never skip core meaning — expand or trim around it.
+
+FIX 5 — SPEECH RHYTHM
+Remove all — (em-dash) and word-connecting - (hyphen) from dialogue.
+Replace with comma, conjunction (aur/toh/par/phir), or full stop as appropriate.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT — use EXACTLY this structure, no markdown, no extra text
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PRODUCTION BRIEF
+================
+HOOK TYPE: [type + strength + fix applied in improved script]
+HINGLISH REGISTER: [assessment + flagged lines]
+TIER 2–3 TEXTURE: [RICH/MODERATE/THIN + gaps]
+COACH LINE REGISTER: [original coach lines + how converted]
+EMOTIONAL ARC: [label]
+PAYOFF TYPE: [type]
+DIALOGUE WORD COUNTS: [per clip with ✓/⚠️]
+SPEECH RHYTHM AUDIT: [dash findings or CLEAN]
+DIRECTOR NOTES: [2–3 specific instructions for the clip prompt generator]
+
+IMPROVED SCRIPT
+===============
+[Full rewritten script with ALL fixes applied. Keep the same clip structure.
+Format each clip as: CLIP N\n[character]: "[dialogue]"]"""
+
+    response = client.models.generate_content(
+        model="gemini-2.5-pro",
+        contents=f"Analyse and rewrite this SuperLiving ad script:\n\n{script}",
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            temperature=0.3,
+        ),
+    )
+
+    if response is None or response.text is None:
+        return "", script  # Fail gracefully — return empty brief, original script
+
+    raw = response.text.strip()
+
+    # Split on the IMPROVED SCRIPT delimiter
+    delimiter = "IMPROVED SCRIPT\n==============="
+    if delimiter in raw:
+        parts = raw.split(delimiter, 1)
+        production_brief = parts[0].strip()
+        improved_script = parts[1].strip()
+    else:
+        # Fallback: whole response is the brief, return original script unchanged
+        production_brief = raw
+        improved_script = script
+
+    return production_brief, improved_script
+
 
 def build_clip_prompts(
     client,
@@ -139,6 +284,7 @@ def build_clip_prompts(
     num_clips: int,
     language_note: bool,
     has_photos: bool = False,
+    production_brief: str = "",
 ) -> list:
     ratio_map = {
         "9:16 (Reels / Shorts)": "9:16 vertical portrait",
@@ -193,7 +339,9 @@ Clips 2+ use the last frame of the previous clip as I2V — text still anchors i
         f"SUPERLIVING AD SCRIPT:\n{script}"
         f"{char_sheet_injection}"
         f"{extra_section}"
-        f"\n\nNow generate exactly {num_clips} clip prompts as JSON."
+        + (f"\n\nPRODUCTION BRIEF (from script analyst — follow these director notes precisely):\n{production_brief}"
+           if production_brief else "")
+        + f"\n\nGenerate exactly {num_clips} clip prompts as JSON now."
     )
 
     contents = [types.Part.from_text(text=user_text)]
@@ -224,7 +372,32 @@ Clips 2+ use the last frame of the previous clip as I2V — text still anchors i
     raw = raw.strip()
 
     data = json.loads(raw)
-    return data["clips"]
+    clips = data["clips"]
+
+    # ── Brightness boost for last 2 clips ─────────────────────────────────────
+    # Veo's I2V chain causes progressive brightness decay by clips 4–6.
+    # Even with "IDENTICAL to clip 1" in every clip, the model inherits the
+    # darker I2V input frame and compounds the darkness. For the last 2 clips
+    # we override with an explicit OVEREXPOSURE instruction so Veo fights back.
+    STANDARD_ANCHOR = (
+        "Exposure: same bright, well-lit level as clip 1. Face fully illuminated, "
+        "no dimming, no shadow creep. Overall brightness IDENTICAL to clip 1. "
+        "Camera exposure LOCKED."
+    )
+    BOOST_ANCHOR = (
+        "⚡ BRIGHTNESS OVERRIDE (I2V drift compensation): Render this clip "
+        "15–20% BRIGHTER than clip 1 to offset cumulative I2V brightness decay. "
+        "Face must be OVER-LIT — deliberately elevated exposure, never dim. "
+        "Ignore the darker starting I2V frame; boost exposure aggressively. "
+        "Overall brightness visibly HIGHER than clip 1. Camera exposure BOOSTED."
+    )
+    if len(clips) >= 2:
+        for idx in range(max(0, len(clips) - 2), len(clips)):
+            prompt_val = clips[idx].get("prompt", "")
+            if isinstance(prompt_val, str):
+                clips[idx]["prompt"] = prompt_val.replace(STANDARD_ANCHOR, BOOST_ANCHOR)
+
+    return clips
 
 # CONTINUING FROM (Gemini Vision)
 def build_continuing_from(

@@ -1,7 +1,7 @@
 "use client";
 
-import { Dispatch, SetStateAction } from "react";
-import { motion } from "framer-motion";
+import { Dispatch, SetStateAction, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import type { ClipPrompt } from "@/app/page";
 
 /* ─── Props ─────────────────────────────────────────────────────────────── */
@@ -11,6 +11,7 @@ interface Props {
   setClips: Dispatch<SetStateAction<ClipPrompt[]>>;
   characterSheet: string;
   setCharacterSheet: Dispatch<SetStateAction<string>>;
+  productionBrief?: string;
   onVerify: () => void;       // ← opens Gemini verify phase
   onConfirm: () => void;
   onBack: () => void;
@@ -24,11 +25,13 @@ export default function PromptEditor({
   setClips,
   characterSheet,
   setCharacterSheet,
+  productionBrief,
   onVerify,
   onConfirm,
   onBack,
   loading,
 }: Props) {
+  const [briefOpen, setBriefOpen] = useState(false);
   const updateClip = (index: number, field: keyof ClipPrompt, value: string) => {
     setClips((prev) => {
       const copy = [...prev];
@@ -96,6 +99,54 @@ export default function PromptEditor({
           ✨ Verify Prompts
         </button>
       </div>
+
+      {/* ── Production Brief (Step 0 output) ─────────────────────────── */}
+      {productionBrief && (
+        <div
+          className="rounded-2xl border overflow-hidden"
+          style={{
+            background: "rgba(234,179,8,0.06)",
+            borderColor: "rgba(234,179,8,0.25)",
+          }}
+        >
+          <button
+            onClick={() => setBriefOpen((o) => !o)}
+            className="w-full flex items-center justify-between px-5 py-3.5 text-left transition hover:bg-white/5"
+          >
+            <div className="flex items-center gap-2.5">
+              <span className="text-lg">📋</span>
+              <div>
+                <p className="text-sm font-semibold text-yellow-300">Production Brief — Step 0 Analysis</p>
+                <p className="text-xs text-white/45">
+                  Hook type · Hinglish register · Emotional arc · Word counts · Director notes
+                </p>
+              </div>
+            </div>
+            <span className="text-white/40 text-sm select-none">
+              {briefOpen ? "▲" : "▼"}
+            </span>
+          </button>
+          <AnimatePresence initial={false}>
+            {briefOpen && (
+              <motion.div
+                key="brief-body"
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                style={{ overflow: "hidden" }}
+              >
+                <pre
+                  className="px-5 pb-5 text-xs leading-relaxed whitespace-pre-wrap font-mono"
+                  style={{ color: "rgba(253,224,71,0.85)" }}
+                >
+                  {productionBrief}
+                </pre>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
 
       {/* ── Character Sheet (no-photos path) ─────────────────────────── */}
       {characterSheet && (
